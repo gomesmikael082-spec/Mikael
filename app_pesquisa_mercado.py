@@ -16,11 +16,49 @@ from docx.oxml.ns import nsdecls
 CONFIG_FILE = "config_variaveis.json"
 
 DEFAULT_VARS = [
-    {"nome": "Via", "tipo": "codigo", "opcoes": ["1 - Local", "2 - Coletora", "3 - Arterial"]},
-    {"nome": "Uso", "tipo": "codigo", "opcoes": ["1 - Residencial", "2 - Comercial", "3 - Misto"]},
-    {"nome": "Testada (m)", "tipo": "numero", "opcoes": []},
-    {"nome": "PGV (R$)", "tipo": "numero", "opcoes": []}
+    {"nome": "Aptidão", "tipo": "codigo", "opcoes": ["I. Lavoura – Aptidão Boa", "IV. Pastagem Plantada", "V. Silvicultura ou Pastagem Natural"]},
+    {"nome": "Acesso", "tipo": "codigo", "opcoes": ["Favorável", "Desfavorável", "Regular", "Má"]},
+    {"nome": "Nota Agronômica", "tipo": "numero", "opcoes": []},
+    {"nome": "Benfeitoria", "tipo": "numero", "opcoes": []}
 ]
+
+def converter_para_float(texto):
+    """Converte strings financeiras e de área (com pontos e vírgulas) de forma segura."""
+    if texto is None:
+        return 0.0
+    s = str(texto).replace("R$", "").replace("m²", "").replace("ha", "").strip()
+    if not s:
+        return 0.0
+    
+    # Se contém tanto ponto quanto vírgula (ex: 27.500.000,00)
+    if "." in s and "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        # Padrão brasileiro decimal (ex: 476,7400)
+        s = s.replace(",", ".")
+    elif "." in s:
+        partes = s.split(".")
+        # Múltiplos pontos são separadores de milhar (ex: 27.500.000)
+        if len(partes) > 2:
+            s = s.replace(".", "")
+        elif len(partes) == 2 and len(partes[1]) == 3 and len(partes[0]) <= 3:
+            # Caso ambíguo de milhar sem centavos (ex: 27.500)
+            s = s.replace(".", "")
+    return float(s)
+
+def formatar_moeda_br(valor):
+    return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def formatar_numero_br(valor, casas=2):
+    fmt = f"{{:,.{casas}f}}"
+    return fmt.format(valor).replace(",", "X").replace(".", ",").replace("X", ".")
+
+def limpar_sufixo_coord(coord_str):
+    s = str(coord_str).strip()
+    s = re.sub(r'\s*m\s*[ESes]\s*$', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s*[ESes]\s*$', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s*m\s*$', '', s, flags=re.IGNORECASE)
+    return s.strip()
 
 class AppPesquisaMercado:
     def __init__(self, root):
@@ -101,7 +139,7 @@ class AppPesquisaMercado:
         frame_area.grid(row=3, column=1, sticky="w", padx=4, pady=2)
         self.txt_area = ttk.Entry(frame_area, width=13)
         self.txt_area.pack(side="left")
-        self.var_unidade = tk.StringVar(value="m²")
+        self.var_unidade = tk.StringVar(value="ha")
         self.cb_unidade = ttk.Combobox(frame_area, textvariable=self.var_unidade, values=["m²", "ha"], width=5, state="readonly")
         self.cb_unidade.pack(side="left", padx=2)
 
@@ -127,6 +165,7 @@ class AppPesquisaMercado:
 
         ttk.Label(frame_coords, text="Data:").pack(side="left", padx=(0, 2))
         self.txt_data = ttk.Entry(frame_coords, width=12)
+        self.txt_data.insert(0, "03/09/2026")
         self.txt_data.pack(side="left")
 
         ttk.Label(frame_form, text="Link do Anúncio:").grid(row=5, column=0, sticky="w")
@@ -143,7 +182,7 @@ class AppPesquisaMercado:
         self.txt_foto2.grid(row=7, column=1, columnspan=2, sticky="w", padx=4, pady=2)
         ttk.Button(frame_form, text="Buscar", command=lambda: self._buscar_arquivo_foto(self.txt_foto2)).grid(row=7, column=3, sticky="w")
 
-        # Frame de Variáveis Dinâmicas
+        # Variáveis Dinâmicas
         self.frame_vars = ttk.LabelFrame(self.root, text=" Variáveis da Avaliação ", padding=10)
         self.frame_vars.pack(fill="x", padx=10, pady=4)
         self.widgets_dinamicos = {}
@@ -161,7 +200,7 @@ class AppPesquisaMercado:
 
         ttk.Button(frame_btn_cad, text="⚙ Gerenciar Variáveis", command=self._janela_config_variaveis).pack(side="right", padx=4)
 
-        # Tabela Visualização
+        # Tabela
         frame_tabela = ttk.LabelFrame(self.root, text=" Dados Cadastrados (Clique duplo para editar) ", padding=10)
         frame_tabela.pack(fill="both", expand=True, padx=10, pady=4)
 
@@ -294,6 +333,7 @@ class AppPesquisaMercado:
         self.txt_coord_e.delete(0, tk.END)
         self.txt_coord_s.delete(0, tk.END)
         self.txt_data.delete(0, tk.END)
+        self.txt_data.insert(0, "03/09/2026")
         self.txt_link.delete(0, tk.END)
         self.txt_foto1.delete(0, tk.END)
         self.txt_foto2.delete(0, tk.END)
@@ -311,33 +351,33 @@ class AppPesquisaMercado:
 
     def _adicionar_ou_salvar_dado(self):
         try:
-            valor_raw = self.txt_valor.get().replace("R$", "").replace(".", "").replace(",", ".").strip()
-            area_raw = self.txt_area.get().replace(".", "").replace(",", ".").strip()
-            const_raw = self.txt_area_const.get().replace(".", "").replace(",", ".").strip()
-
-            valor_total = float(valor_raw)
-            area_num = float(area_raw)
-            area_const = float(const_raw) if const_raw else 0.0
+            valor_total = converter_para_float(self.txt_valor.get())
+            area_num = converter_para_float(self.txt_area.get())
+            area_const = converter_para_float(self.txt_area_const.get())
             unidade = self.var_unidade.get()
-            unitario = valor_total / area_num if area_num > 0 else 0
+            unitario = valor_total / area_num if area_num > 0 else 0.0
 
             dado_num = self.item_em_edicao["D."] if self.item_em_edicao else (len(self.dados_pesquisas) + 1)
 
+            # Limpa qualquer "m E" ou "m S" pré-existente
+            coord_e_pura = limpar_sufixo_coord(self.txt_coord_e.get())
+            coord_s_pura = limpar_sufixo_coord(self.txt_coord_s.get())
+
             registro = {
                 "D.": dado_num,
-                "Informante": self.txt_informante.get(),
-                "Telefone": self.txt_telefone.get(),
-                "Endereço": self.txt_endereco.get(),
-                "Bairro": self.txt_bairro.get(),
-                "Município": self.txt_municipio.get(),
+                "Informante": self.txt_informante.get().strip(),
+                "Telefone": self.txt_telefone.get().strip(),
+                "Endereço": self.txt_endereco.get().strip(),
+                "Bairro": self.txt_bairro.get().strip(),
+                "Município": self.txt_municipio.get().strip(),
                 "Valor Total (R$)": valor_total,
                 f"Área Terreno ({unidade})": area_num,
                 "Área Construída (m²)": area_const,
                 f"Unitário (R$/{unidade})": unitario,
                 "Localização": "Rural" if unidade == "ha" else "Urbana",
                 "Zona UTM": self.txt_zona.get().strip(),
-                "Coord. E (m)": self.txt_coord_e.get().strip(),
-                "Coord. S (m)": self.txt_coord_s.get().strip(),
+                "Coord. E (m)": coord_e_pura,
+                "Coord. S (m)": coord_s_pura,
                 "Data": self.txt_data.get().strip(),
                 "Link": self.txt_link.get().strip(),
                 "Foto1": self.txt_foto1.get().strip(),
@@ -361,19 +401,24 @@ class AppPesquisaMercado:
             self._recarregar_grid()
             self._limpar_formulario()
         except Exception as e:
-            messagebox.showerror("Erro de Preenchimento", f"Verifique os campos: {e}")
+            messagebox.showerror("Erro de Preenchimento", f"Verifique os campos numéricos: {e}")
 
     def _recarregar_grid(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
 
         for dado in self.dados_pesquisas:
-            un = dado.get("Unidade", "m²")
+            un = dado.get("Unidade", "ha")
+            casas = 4 if un == "ha" else 2
+            v_total = dado.get("Valor Total (R$)", 0.0)
+            a_total = dado.get(f"Área Terreno ({un})", 0.0)
+            u_unit = dado.get(f"Unitário (R$/{un})", 0.0)
+
             self.tree.insert("", "end", values=(
                 dado["D."], dado["Informante"], dado["Endereço"],
-                dado["Município"], f"R$ {dado['Valor Total (R$)']:,.2f}",
-                f"{dado.get(f'Área Terreno ({un})', 0):,.2f}",
-                un, f"R$ {dado.get(f'Unitário (R$/{un})', 0):,.2f}"
+                dado["Município"], f"R$ {formatar_moeda_br(v_total)}",
+                f"{formatar_numero_br(a_total, casas)}",
+                un, f"R$ {formatar_moeda_br(u_unit)}"
             ))
 
     def _carregar_para_edicao(self):
@@ -407,16 +452,24 @@ class AppPesquisaMercado:
         self.txt_municipio.delete(0, tk.END)
         self.txt_municipio.insert(0, dado.get("Município", ""))
 
+        # Carrega o valor total formatado em padrão brasileiro (evita ponto decimal do python)
+        v_total = dado.get("Valor Total (R$)", 0.0)
         self.txt_valor.delete(0, tk.END)
-        self.txt_valor.insert(0, str(dado.get("Valor Total (R$)", "")))
+        self.txt_valor.insert(0, formatar_moeda_br(v_total))
 
-        un = dado.get("Unidade", "m²")
+        un = dado.get("Unidade", "ha")
         self.var_unidade.set(un)
-        self.txt_area.delete(0, tk.END)
-        self.txt_area.insert(0, str(dado.get(f"Área Terreno ({un})", "")))
 
+        # Carrega área com formato brasileiro
+        a_total = dado.get(f"Área Terreno ({un})", 0.0)
+        casas = 4 if un == "ha" else 2
+        self.txt_area.delete(0, tk.END)
+        self.txt_area.insert(0, formatar_numero_br(a_total, casas))
+
+        a_const = dado.get("Área Construída (m²)", 0.0)
         self.txt_area_const.delete(0, tk.END)
-        self.txt_area_const.insert(0, str(dado.get("Área Construída (m²)", "")))
+        if a_const > 0:
+            self.txt_area_const.insert(0, formatar_numero_br(a_const, 2))
 
         self.txt_zona.delete(0, tk.END)
         self.txt_zona.insert(0, dado.get("Zona UTM", ""))
@@ -567,7 +620,6 @@ class AppPesquisaMercado:
             if i > 0:
                 doc.add_page_break()
 
-            # Título: PESQUISA DE MERCADO - MEMÓRIA DE CÁLCULO (sem logo)
             p_tit = doc.add_paragraph()
             p_tit.paragraph_format.space_before = Pt(0)
             p_tit.paragraph_format.space_after = Pt(2)
@@ -576,7 +628,6 @@ class AppPesquisaMercado:
             r_tit.font.name = "Arial"
             r_tit.font.size = Pt(10)
 
-            # Barra azul técnica
             p_bar = doc.add_paragraph()
             p_bar.paragraph_format.space_before = Pt(0)
             p_bar.paragraph_format.space_after = Pt(4)
@@ -594,7 +645,7 @@ class AppPesquisaMercado:
 
             lote = self.dados_pesquisas[i:i+2]
             for dado in lote:
-                un = dado.get("Unidade", "m²")
+                un = dado.get("Unidade", "ha")
                 row = tabela.add_row()
                 celula_dados, celula_fotos = row.cells[0], row.cells[1]
                 celula_dados.width = Inches(3.7)
@@ -602,7 +653,7 @@ class AppPesquisaMercado:
                 celula_dados.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
                 celula_fotos.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
 
-                # Título da Pesquisa NO TOPO e CENTRALIZADO (Arial 10, Negrito)
+                # Título da Pesquisa centralizado no topo
                 p_num = celula_dados.paragraphs[0]
                 p_num.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 p_num.paragraph_format.space_before = Pt(0)
@@ -612,7 +663,6 @@ class AppPesquisaMercado:
                 r_num.font.name = "Arial"
                 r_num.font.size = Pt(10)
 
-                # Parágrafo de conteúdo dos dados em Arial 10
                 p_dados = celula_dados.add_paragraph()
                 p_dados.paragraph_format.line_spacing = 1.10
                 p_dados.paragraph_format.space_before = Pt(0)
@@ -628,16 +678,25 @@ class AppPesquisaMercado:
                     r2.font.size = Pt(10)
 
                 add_f_line(p_dados, "Logradouro:", dado.get("Endereço", ""))
-                add_f_line(p_dados, "Bairro:", dado.get("Bairro", ""))
+                if dado.get("Bairro"):
+                    add_f_line(p_dados, "Bairro:", dado.get("Bairro", ""))
                 add_f_line(p_dados, "Município:", dado.get("Município", ""))
                 add_f_line(p_dados, "Contato:", f"{dado.get('Telefone', '')} - {dado.get('Informante', '')}")
                 add_f_line(p_dados, "Link:", dado.get("Link", ""))
                 p_dados.add_run("\n")
 
-                add_f_line(p_dados, "Área Terreno:", f"{dado.get(f'Área Terreno ({un})', 0):,.2f} {un}" if un == "m²" else f"{dado.get(f'Área Terreno ({un})', 0):,.3f} {un}")
-                add_f_line(p_dados, "Área Construída:", f"{dado.get('Área Construída (m²)', 0):,.2f} m²")
-                add_f_line(p_dados, "Valor da Oferta:", f"R$ {dado.get('Valor Total (R$)', 0):,.2f}")
-                add_f_line(p_dados, f"Valor Unitário/{un}:", f"R$ {dado.get(f'Unitário (R$/{un})', 0):,.2f}/{un}")
+                area_val = dado.get(f"Área Terreno ({un})", 0.0)
+                casas_area = 4 if un == "ha" else 2
+                add_f_line(p_dados, "Área Terreno:", f"{formatar_numero_br(area_val, casas_area)} {un}")
+
+                const_val = dado.get("Área Construída (m²)", 0.0)
+                add_f_line(p_dados, "Área Construída:", f"{formatar_numero_br(const_val, 2)} m²")
+
+                v_total = dado.get("Valor Total (R$)", 0.0)
+                add_f_line(p_dados, "Valor da Oferta:", f"R$ {formatar_moeda_br(v_total)}")
+
+                u_val = dado.get(f"Unitário (R$/{un})", 0.0)
+                add_f_line(p_dados, f"Valor Unitário/{un}:", f"R$ {formatar_moeda_br(u_val)}/{un}")
                 p_dados.add_run("\n")
 
                 for v_cfg in self.variaveis_config:
@@ -645,15 +704,18 @@ class AppPesquisaMercado:
                     v_val = dado.get("VariaveisExtras", {}).get(v_nome, dado.get(v_nome, ""))
                     add_f_line(p_dados, f"{v_nome}:", v_val)
 
-                # Formatação das Coordenadas Geográficas com Zona UTM
+                # Formatação das Coordenadas Geográficas
                 zona_str = f"{dado.get('Zona UTM', '').strip()} " if dado.get('Zona UTM') else ""
-                coord_texto = f"{zona_str}{dado.get('Coord. E (m)', '')} m E / {dado.get('Coord. S (m)', '')} m S"
+                coord_e = limpar_sufixo_coord(dado.get('Coord. E (m)', ''))
+                coord_s = limpar_sufixo_coord(dado.get('Coord. S (m)', ''))
+                coord_texto = f"{zona_str}{coord_e} m E / {coord_s} m S" if coord_e or coord_s else ""
+
                 add_f_line(p_dados, "Coordenadas Geográfica:", coord_texto)
-                add_f_line(p_dados, "Localização:", dado.get("Localização", "Urbana"))
+                add_f_line(p_dados, "Localização:", dado.get("Localização", "Rural"))
                 p_dados.add_run("\n")
                 add_f_line(p_dados, "Data:", dado.get("Data", ""))
 
-                # Inserção das Fotos (Dimensão reduzida e balanceada)
+                # Inserção das Fotos
                 img1 = self._baixar_imagem(dado.get("Foto1"))
                 img2 = self._baixar_imagem(dado.get("Foto2"))
 
@@ -695,9 +757,6 @@ class AppPesquisaMercado:
         messagebox.showinfo("Exportação Concluída", "Fichas de Pesquisa no Word geradas com sucesso!")
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = AppPesquisaMercado(root)
-    root.mainloop()
     root = tk.Tk()
     app = AppPesquisaMercado(root)
     root.mainloop()
