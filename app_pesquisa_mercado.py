@@ -14,20 +14,19 @@ from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
 
 CONFIG_FILE = "config_variaveis.json"
-LOGO_PADRAO = "logo_enprol.png"
 
 DEFAULT_VARS = [
-    {"nome": "Aptidão", "tipo": "codigo", "opcoes": ["IV. Pastagem Plantada", "V. Silvicultura ou Pastagem Natural"]},
-    {"nome": "Acesso", "tipo": "codigo", "opcoes": ["Favorável", "Desfavorável", "Regular", "Má"]},
-    {"nome": "Nota Agronômica", "tipo": "numero", "opcoes": []},
-    {"nome": "Benfeitoria", "tipo": "numero", "opcoes": []}
+    {"nome": "Via", "tipo": "codigo", "opcoes": ["1 - Local", "2 - Coletora", "3 - Arterial"]},
+    {"nome": "Uso", "tipo": "codigo", "opcoes": ["1 - Residencial", "2 - Comercial", "3 - Misto"]},
+    {"nome": "Testada (m)", "tipo": "numero", "opcoes": []},
+    {"nome": "PGV (R$)", "tipo": "numero", "opcoes": []}
 ]
 
 class AppPesquisaMercado:
     def __init__(self, root):
         self.root = root
         self.root.title("Gerador de Pesquisa de Mercado - SISDEA / Word")
-        self.root.geometry("1020x780")
+        self.root.geometry("1060x800")
 
         self.dados_pesquisas = []
         self.item_em_edicao = None
@@ -51,12 +50,12 @@ class AppPesquisaMercado:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.variaveis_config, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            messagebox.showerror("Erro ao salvar configurações", str(e))
+            messagebox.showerror("Erro ao salvar variáveis", str(e))
 
     def _criar_menu(self):
         menubar = tk.Menu(self.root)
         menu_arquivo = tk.Menu(menubar, tearoff=0)
-        menu_arquivo.add_command(label="Novo Projeto", command=self._novo_projeto)
+        menu_arquivo.add_command(label="Novo Projeto Completo", command=self._novo_projeto)
         menu_arquivo.add_command(label="Abrir Projeto...", command=self._abrir_projeto)
         menu_arquivo.add_command(label="Salvar Projeto", command=self._salvar_projeto)
         menu_arquivo.add_separator()
@@ -71,90 +70,100 @@ class AppPesquisaMercado:
 
     def _criar_layout(self):
         frame_form = ttk.LabelFrame(self.root, text=" Cadastro do Dado de Mercado ", padding=10)
-        frame_form.pack(fill="x", padx=10, pady=5)
+        frame_form.pack(fill="x", padx=10, pady=4)
 
         ttk.Label(frame_form, text="Informante:").grid(row=0, column=0, sticky="w")
-        self.txt_informante = ttk.Entry(frame_form, width=24)
-        self.txt_informante.grid(row=0, column=1, padx=5, pady=2)
+        self.txt_informante = ttk.Entry(frame_form, width=22)
+        self.txt_informante.grid(row=0, column=1, padx=4, pady=2)
 
         ttk.Label(frame_form, text="Telefone:").grid(row=0, column=2, sticky="w")
-        self.txt_telefone = ttk.Entry(frame_form, width=24)
-        self.txt_telefone.grid(row=0, column=3, padx=5, pady=2)
+        self.txt_telefone = ttk.Entry(frame_form, width=22)
+        self.txt_telefone.grid(row=0, column=3, padx=4, pady=2)
 
         ttk.Label(frame_form, text="Endereço/Logradouro:").grid(row=1, column=0, sticky="w")
-        self.txt_endereco = ttk.Entry(frame_form, width=24)
-        self.txt_endereco.grid(row=1, column=1, padx=5, pady=2)
+        self.txt_endereco = ttk.Entry(frame_form, width=22)
+        self.txt_endereco.grid(row=1, column=1, padx=4, pady=2)
 
         ttk.Label(frame_form, text="Bairro:").grid(row=1, column=2, sticky="w")
-        self.txt_bairro = ttk.Entry(frame_form, width=24)
-        self.txt_bairro.grid(row=1, column=3, padx=5, pady=2)
+        self.txt_bairro = ttk.Entry(frame_form, width=22)
+        self.txt_bairro.grid(row=1, column=3, padx=4, pady=2)
 
         ttk.Label(frame_form, text="Município:").grid(row=2, column=0, sticky="w")
-        self.txt_municipio = ttk.Entry(frame_form, width=24)
-        self.txt_municipio.grid(row=2, column=1, padx=5, pady=2)
+        self.txt_municipio = ttk.Entry(frame_form, width=22)
+        self.txt_municipio.grid(row=2, column=1, padx=4, pady=2)
 
         ttk.Label(frame_form, text="Valor Total (R$):").grid(row=2, column=2, sticky="w")
-        self.txt_valor = ttk.Entry(frame_form, width=24)
-        self.txt_valor.grid(row=2, column=3, padx=5, pady=2)
+        self.txt_valor = ttk.Entry(frame_form, width=22)
+        self.txt_valor.grid(row=2, column=3, padx=4, pady=2)
 
         ttk.Label(frame_form, text="Área Terreno:").grid(row=3, column=0, sticky="w")
         frame_area = ttk.Frame(frame_form)
-        frame_area.grid(row=3, column=1, sticky="w", padx=5, pady=2)
-        self.txt_area = ttk.Entry(frame_area, width=14)
+        frame_area.grid(row=3, column=1, sticky="w", padx=4, pady=2)
+        self.txt_area = ttk.Entry(frame_area, width=13)
         self.txt_area.pack(side="left")
-        self.var_unidade = tk.StringVar(value="ha")
+        self.var_unidade = tk.StringVar(value="m²")
         self.cb_unidade = ttk.Combobox(frame_area, textvariable=self.var_unidade, values=["m²", "ha"], width=5, state="readonly")
         self.cb_unidade.pack(side="left", padx=2)
 
         ttk.Label(frame_form, text="Área Const. (m²):").grid(row=3, column=2, sticky="w")
-        self.txt_area_const = ttk.Entry(frame_form, width=24)
-        self.txt_area_const.insert(0, "0")
-        self.txt_area_const.grid(row=3, column=3, padx=5, pady=2)
+        self.txt_area_const = ttk.Entry(frame_form, width=22)
+        self.txt_area_const.grid(row=3, column=3, padx=4, pady=2)
 
-        ttk.Label(frame_form, text="Coord. E (m):").grid(row=4, column=0, sticky="w")
-        self.txt_coord_e = ttk.Entry(frame_form, width=24)
-        self.txt_coord_e.grid(row=4, column=1, padx=5, pady=2)
+        # Zona UTM e Coordenadas
+        frame_coords = ttk.Frame(frame_form)
+        frame_coords.grid(row=4, column=0, columnspan=4, sticky="w", pady=3)
 
-        ttk.Label(frame_form, text="Coord. S (m):").grid(row=4, column=2, sticky="w")
-        self.txt_coord_s = ttk.Entry(frame_form, width=24)
-        self.txt_coord_s.grid(row=4, column=3, padx=5, pady=2)
+        ttk.Label(frame_coords, text="Zona UTM:", foreground="#b22222", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 2))
+        self.txt_zona = ttk.Entry(frame_coords, width=7)
+        self.txt_zona.pack(side="left", padx=(0, 10))
 
-        ttk.Label(frame_form, text="Data:").grid(row=5, column=0, sticky="w")
-        self.txt_data = ttk.Entry(frame_form, width=24)
-        self.txt_data.insert(0, "26/08/2026")
-        self.txt_data.grid(row=5, column=1, padx=5, pady=2)
+        ttk.Label(frame_coords, text="Coord. E (m):").pack(side="left", padx=(0, 2))
+        self.txt_coord_e = ttk.Entry(frame_coords, width=16)
+        self.txt_coord_e.pack(side="left", padx=(0, 10))
 
-        ttk.Label(frame_form, text="Link do Anúncio:").grid(row=5, column=2, sticky="w")
-        self.txt_link = ttk.Entry(frame_form, width=24)
-        self.txt_link.grid(row=5, column=3, padx=5, pady=2)
+        ttk.Label(frame_coords, text="Coord. S (m):").pack(side="left", padx=(0, 2))
+        self.txt_coord_s = ttk.Entry(frame_coords, width=16)
+        self.txt_coord_s.pack(side="left", padx=(0, 10))
+
+        ttk.Label(frame_coords, text="Data:").pack(side="left", padx=(0, 2))
+        self.txt_data = ttk.Entry(frame_coords, width=12)
+        self.txt_data.pack(side="left")
+
+        ttk.Label(frame_form, text="Link do Anúncio:").grid(row=5, column=0, sticky="w")
+        self.txt_link = ttk.Entry(frame_form, width=65)
+        self.txt_link.grid(row=5, column=1, columnspan=3, sticky="w", padx=4, pady=2)
 
         ttk.Label(frame_form, text="Foto 1 (Imóvel/Drone):").grid(row=6, column=0, sticky="w")
-        self.txt_foto1 = ttk.Entry(frame_form, width=40)
-        self.txt_foto1.grid(row=6, column=1, columnspan=2, sticky="w", padx=5, pady=2)
+        self.txt_foto1 = ttk.Entry(frame_form, width=52)
+        self.txt_foto1.grid(row=6, column=1, columnspan=2, sticky="w", padx=4, pady=2)
         ttk.Button(frame_form, text="Buscar", command=lambda: self._buscar_arquivo_foto(self.txt_foto1)).grid(row=6, column=3, sticky="w")
 
         ttk.Label(frame_form, text="Foto 2 (Print Anúncio):").grid(row=7, column=0, sticky="w")
-        self.txt_foto2 = ttk.Entry(frame_form, width=40)
-        self.txt_foto2.grid(row=7, column=1, columnspan=2, sticky="w", padx=5, pady=2)
+        self.txt_foto2 = ttk.Entry(frame_form, width=52)
+        self.txt_foto2.grid(row=7, column=1, columnspan=2, sticky="w", padx=4, pady=2)
         ttk.Button(frame_form, text="Buscar", command=lambda: self._buscar_arquivo_foto(self.txt_foto2)).grid(row=7, column=3, sticky="w")
 
+        # Frame de Variáveis Dinâmicas
         self.frame_vars = ttk.LabelFrame(self.root, text=" Variáveis da Avaliação ", padding=10)
-        self.frame_vars.pack(fill="x", padx=10, pady=5)
+        self.frame_vars.pack(fill="x", padx=10, pady=4)
         self.widgets_dinamicos = {}
 
-        frame_btn_cad = ttk.Frame(self.root, padding=5)
+        frame_btn_cad = ttk.Frame(self.root, padding=4)
         frame_btn_cad.pack(fill="x", padx=10)
 
         self.btn_salvar_dado = ttk.Button(frame_btn_cad, text="➕ Adicionar Dado à Lista", command=self._adicionar_ou_salvar_dado)
-        self.btn_salvar_dado.pack(side="left", padx=5)
+        self.btn_salvar_dado.pack(side="left", padx=4)
+
+        ttk.Button(frame_btn_cad, text="🧹 Novo Dado / Limpar Campos", command=self._limpar_formulario).pack(side="left", padx=4)
 
         self.btn_cancelar_edicao = ttk.Button(frame_btn_cad, text="✖ Cancelar Edição", command=self._limpar_formulario, state="disabled")
-        self.btn_cancelar_edicao.pack(side="left", padx=5)
+        self.btn_cancelar_edicao.pack(side="left", padx=4)
 
-        ttk.Button(frame_btn_cad, text="⚙ Gerenciar Variáveis", command=self._janela_config_variaveis).pack(side="right", padx=5)
+        ttk.Button(frame_btn_cad, text="⚙ Gerenciar Variáveis", command=self._janela_config_variaveis).pack(side="right", padx=4)
 
+        # Tabela Visualização
         frame_tabela = ttk.LabelFrame(self.root, text=" Dados Cadastrados (Clique duplo para editar) ", padding=10)
-        frame_tabela.pack(fill="both", expand=True, padx=10, pady=5)
+        frame_tabela.pack(fill="both", expand=True, padx=10, pady=4)
 
         colunas = ("dado", "informante", "endereco", "municipio", "valor", "area", "unidade", "unitario")
         self.tree = ttk.Treeview(frame_tabela, columns=colunas, show="headings", height=7)
@@ -167,85 +176,83 @@ class AppPesquisaMercado:
         self.tree.heading("unidade", text="Unid.")
         self.tree.heading("unitario", text="Unitário (R$/un)")
 
-        self.tree.column("dado", width=40, anchor="center")
-        self.tree.column("unidade", width=60, anchor="center")
+        self.tree.column("dado", width=35, anchor="center")
+        self.tree.column("unidade", width=55, anchor="center")
         self.tree.pack(fill="both", expand=True)
 
         self.tree.bind("<Double-1>", lambda event: self._carregar_para_edicao())
 
         frame_botoes_grid = ttk.Frame(frame_tabela)
-        frame_botoes_grid.pack(fill="x", pady=5)
-        ttk.Button(frame_botoes_grid, text="✏ Editar Selecionado", command=self._carregar_para_edicao).pack(side="left", padx=5)
-        ttk.Button(frame_botoes_grid, text="🗑 Excluir Selecionado", command=self._excluir_dado).pack(side="left", padx=5)
+        frame_botoes_grid.pack(fill="x", pady=4)
+        ttk.Button(frame_botoes_grid, text="✏ Editar Selecionado", command=self._carregar_para_edicao).pack(side="left", padx=4)
+        ttk.Button(frame_botoes_grid, text="🗑 Excluir Selecionado", command=self._excluir_dado).pack(side="left", padx=4)
 
-        frame_acoes = ttk.Frame(self.root, padding=10)
-        frame_acoes.pack(fill="x", padx=10, pady=5)
+        frame_acoes = ttk.Frame(self.root, padding=8)
+        frame_acoes.pack(fill="x", padx=10, pady=4)
 
-        ttk.Button(frame_acoes, text="📊 Exportar para Excel (SISDEA)", command=self._exportar_excel).pack(side="left", padx=10, expand=True, fill="x")
-        ttk.Button(frame_acoes, text="📄 Exportar para Word (Fichas Técnicas)", command=self._exportar_word).pack(side="right", padx=10, expand=True, fill="x")
+        ttk.Button(frame_acoes, text="📊 Exportar para Excel (SISDEA)", command=self._exportar_excel).pack(side="left", padx=8, expand=True, fill="x")
+        ttk.Button(frame_acoes, text="📄 Exportar para Word (Fichas Técnicas)", command=self._exportar_word).pack(side="right", padx=8, expand=True, fill="x")
 
     def _atualizar_interface_variaveis(self):
         for w in self.frame_vars.winfo_children():
             w.destroy()
         self.widgets_dinamicos.clear()
 
-        for idx, var in enumerate(self.variaveis_config[:4]):
+        for idx, var in enumerate(self.variaveis_config):
             col = (idx % 2) * 2
             row = idx // 2
 
             lbl = ttk.Label(self.frame_vars, text=f"{var['nome']}:")
-            lbl.grid(row=row, column=col, sticky="w", padx=5, pady=3)
+            lbl.grid(row=row, column=col, sticky="w", padx=4, pady=2)
 
             if var["tipo"] == "codigo" and var.get("opcoes"):
-                cb = ttk.Combobox(self.frame_vars, values=var["opcoes"], width=26)
+                cb = ttk.Combobox(self.frame_vars, values=var["opcoes"], width=24)
                 if var["opcoes"]:
                     cb.set(var["opcoes"][0])
-                cb.grid(row=row, column=col + 1, sticky="w", padx=5, pady=3)
+                cb.grid(row=row, column=col + 1, sticky="w", padx=4, pady=2)
                 self.widgets_dinamicos[var["nome"]] = cb
             else:
-                ent = ttk.Entry(self.frame_vars, width=28)
-                ent.grid(row=row, column=col + 1, sticky="w", padx=5, pady=3)
+                ent = ttk.Entry(self.frame_vars, width=26)
+                ent.grid(row=row, column=col + 1, sticky="w", padx=4, pady=2)
                 self.widgets_dinamicos[var["nome"]] = ent
 
     def _janela_config_variaveis(self):
         janela = tk.Toplevel(self.root)
         janela.title("Gerenciador de Variáveis da Pesquisa")
-        janela.geometry("620x420")
+        janela.geometry("640x460")
         janela.transient(self.root)
         janela.grab_set()
 
-        ttk.Label(janela, text="Defina até 4 variáveis para a pesquisa:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=8)
+        ttk.Label(janela, text="Defina as variáveis para o projeto (marque 'Ativar' para habilitar):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=10, pady=6)
 
-        frame_lista = ttk.Frame(janela, padding=10)
+        frame_lista = ttk.Frame(janela, padding=6)
         frame_lista.pack(fill="both", expand=True)
 
         entradas_vars = []
+        total_slots = max(6, len(self.variaveis_config) + 2)
 
-        for i in range(4):
-            f_linha = ttk.LabelFrame(frame_lista, text=f" Variável {i+1} ", padding=5)
-            f_linha.pack(fill="x", pady=4)
+        for i in range(total_slots):
+            f_linha = ttk.Frame(frame_lista)
+            f_linha.pack(fill="x", pady=2)
 
             ativa = i < len(self.variaveis_config)
             cfg = self.variaveis_config[i] if ativa else {"nome": "", "tipo": "texto", "opcoes": []}
 
             var_ativa = tk.BooleanVar(value=ativa)
-            chk = ttk.Checkbutton(f_linha, text="Ativar", variable=var_ativa)
-            chk.grid(row=0, column=0, padx=4)
+            chk = ttk.Checkbutton(f_linha, text=f"Var {i+1}", variable=var_ativa)
+            chk.grid(row=0, column=0, padx=2)
 
-            ttk.Label(f_linha, text="Nome:").grid(row=0, column=1)
-            e_nome = ttk.Entry(f_linha, width=18)
+            e_nome = ttk.Entry(f_linha, width=16)
             e_nome.insert(0, cfg.get("nome", ""))
-            e_nome.grid(row=0, column=2, padx=4)
+            e_nome.grid(row=0, column=1, padx=3)
 
-            ttk.Label(f_linha, text="Tipo:").grid(row=0, column=3)
             cb_tipo = ttk.Combobox(f_linha, values=["codigo", "numero", "texto"], width=8, state="readonly")
             cb_tipo.set(cfg.get("tipo", "texto"))
-            cb_tipo.grid(row=0, column=4, padx=4)
+            cb_tipo.grid(row=0, column=2, padx=3)
 
-            ttk.Label(f_linha, text="Opções (sep. vírgula):").grid(row=0, column=5)
-            e_opcoes = ttk.Entry(f_linha, width=24)
+            e_opcoes = ttk.Entry(f_linha, width=28)
             e_opcoes.insert(0, ", ".join(cfg.get("opcoes", [])))
-            e_opcoes.grid(row=0, column=6, padx=4)
+            e_opcoes.grid(row=0, column=3, padx=3)
 
             entradas_vars.append((var_ativa, e_nome, cb_tipo, e_opcoes))
 
@@ -265,7 +272,7 @@ class AppPesquisaMercado:
             janela.destroy()
             messagebox.showinfo("Configurações", "Variáveis salvas com sucesso!")
 
-        ttk.Button(janela, text="💾 Salvar Configurações", command=salvar_configs).pack(pady=10)
+        ttk.Button(janela, text="💾 Salvar Configurações", command=salvar_configs).pack(pady=8)
 
     def _buscar_arquivo_foto(self, entry_widget):
         caminho = filedialog.askopenfilename(filetypes=[("Imagens", "*.png;*.jpg;*.jpeg;*.webp")])
@@ -283,14 +290,15 @@ class AppPesquisaMercado:
         self.txt_valor.delete(0, tk.END)
         self.txt_area.delete(0, tk.END)
         self.txt_area_const.delete(0, tk.END)
-        self.txt_area_const.insert(0, "0")
+        self.txt_zona.delete(0, tk.END)
         self.txt_coord_e.delete(0, tk.END)
         self.txt_coord_s.delete(0, tk.END)
+        self.txt_data.delete(0, tk.END)
         self.txt_link.delete(0, tk.END)
         self.txt_foto1.delete(0, tk.END)
         self.txt_foto2.delete(0, tk.END)
 
-        for nome, widget in self.widgets_dinamicos.items():
+        for _, widget in self.widgets_dinamicos.items():
             if isinstance(widget, ttk.Combobox):
                 vals = widget.cget("values")
                 if vals:
@@ -327,12 +335,13 @@ class AppPesquisaMercado:
                 "Área Construída (m²)": area_const,
                 f"Unitário (R$/{unidade})": unitario,
                 "Localização": "Rural" if unidade == "ha" else "Urbana",
-                "Coord. E (m)": self.txt_coord_e.get(),
-                "Coord. S (m)": self.txt_coord_s.get(),
-                "Data": self.txt_data.get(),
-                "Link": self.txt_link.get(),
-                "Foto1": self.txt_foto1.get(),
-                "Foto2": self.txt_foto2.get(),
+                "Zona UTM": self.txt_zona.get().strip(),
+                "Coord. E (m)": self.txt_coord_e.get().strip(),
+                "Coord. S (m)": self.txt_coord_s.get().strip(),
+                "Data": self.txt_data.get().strip(),
+                "Link": self.txt_link.get().strip(),
+                "Foto1": self.txt_foto1.get().strip(),
+                "Foto2": self.txt_foto2.get().strip(),
                 "Unidade": unidade,
                 "VariaveisExtras": {}
             }
@@ -345,7 +354,7 @@ class AppPesquisaMercado:
             if self.item_em_edicao:
                 idx = next(i for i, d in enumerate(self.dados_pesquisas) if d["D."] == dado_num)
                 self.dados_pesquisas[idx] = registro
-                messagebox.showinfo("Atualização", f"Dado {dado_num} atualizado com sucesso!")
+                messagebox.showinfo("Atualização", f"Pesquisa {dado_num:02d} atualizada com sucesso!")
             else:
                 self.dados_pesquisas.append(registro)
 
@@ -401,13 +410,16 @@ class AppPesquisaMercado:
         self.txt_valor.delete(0, tk.END)
         self.txt_valor.insert(0, str(dado.get("Valor Total (R$)", "")))
 
-        un = dado.get("Unidade", "ha")
+        un = dado.get("Unidade", "m²")
         self.var_unidade.set(un)
         self.txt_area.delete(0, tk.END)
         self.txt_area.insert(0, str(dado.get(f"Área Terreno ({un})", "")))
 
         self.txt_area_const.delete(0, tk.END)
-        self.txt_area_const.insert(0, str(dado.get("Área Construída (m²)", 0)))
+        self.txt_area_const.insert(0, str(dado.get("Área Construída (m²)", "")))
+
+        self.txt_zona.delete(0, tk.END)
+        self.txt_zona.insert(0, dado.get("Zona UTM", ""))
 
         self.txt_coord_e.delete(0, tk.END)
         self.txt_coord_e.insert(0, dado.get("Coord. E (m)", ""))
@@ -452,7 +464,7 @@ class AppPesquisaMercado:
             self._limpar_formulario()
 
     def _novo_projeto(self):
-        if messagebox.askyesno("Novo Projeto", "Deseja criar um novo projeto?"):
+        if messagebox.askyesno("Novo Projeto", "Deseja iniciar um novo projeto limpo? Todos os dados não salvos serão descartados."):
             self.dados_pesquisas = []
             self._recarregar_grid()
             self._limpar_formulario()
@@ -534,54 +546,6 @@ class AppPesquisaMercado:
         )
         tblPr.append(borders)
 
-    def _inserir_cabecalho_pagina(self, doc, is_first_page=False):
-        p_logo = doc.add_paragraph()
-        p_logo.paragraph_format.space_before = Pt(0)
-        p_logo.paragraph_format.space_after = Pt(2)
-
-        # Inserção da Logo da Enprol
-        logo_inserida = False
-        for caminho_logo in [LOGO_PADRAO, "LOGO FICHA ENPROL.png", "logo.png"]:
-            if os.path.exists(caminho_logo):
-                try:
-                    p_logo.add_run().add_picture(caminho_logo, height=Inches(0.42))
-                    logo_inserida = True
-                    break
-                except Exception:
-                    pass
-
-        if not logo_inserida:
-            r_fallback = p_logo.add_run("ENPROL")
-            r_fallback.bold = True
-            r_fallback.font.name = "Arial"
-            r_fallback.font.size = Pt(14)
-            r_fallback.font.color.rgb = RGBColor(28, 93, 153)
-
-        if is_first_page:
-            p_tit = doc.add_paragraph()
-            p_tit.paragraph_format.space_before = Pt(2)
-            p_tit.paragraph_format.space_after = Pt(2)
-            r_tit = p_tit.add_run("PESQUISA DE MERCADO - MEMÓRIA DE CÁLCULO")
-            r_tit.bold = True
-            r_tit.underline = True
-            r_tit.font.name = "Arial"
-            r_tit.font.size = Pt(10)
-
-            # Barra azul técnica
-            p_bar = doc.add_paragraph()
-            p_bar.paragraph_format.space_before = Pt(0)
-            p_bar.paragraph_format.space_after = Pt(4)
-            pBrd = parse_xml(
-                f'<w:pBrd {nsdecls("w")}>'
-                f'<w:bottom w:val="single" w:sz="18" w:space="1" w:color="245D8C"/>'
-                f'</w:pBrd>'
-            )
-            p_bar._p.get_or_add_pPr().append(pBrd)
-        else:
-            p_space = doc.add_paragraph()
-            p_space.paragraph_format.space_before = Pt(0)
-            p_space.paragraph_format.space_after = Pt(4)
-
     def _exportar_word(self):
         if not self.dados_pesquisas:
             messagebox.showwarning("Aviso", "Nenhum dado cadastrado.")
@@ -598,13 +562,30 @@ class AppPesquisaMercado:
             section.left_margin = Inches(0.45)
             section.right_margin = Inches(0.45)
 
-        # Divide os dados de 2 em 2 por página
         total_dados = len(self.dados_pesquisas)
         for i in range(0, total_dados, 2):
             if i > 0:
                 doc.add_page_break()
 
-            self._inserir_cabecalho_pagina(doc, is_first_page=(i == 0))
+            # Título: PESQUISA DE MERCADO - MEMÓRIA DE CÁLCULO (sem logo)
+            p_tit = doc.add_paragraph()
+            p_tit.paragraph_format.space_before = Pt(0)
+            p_tit.paragraph_format.space_after = Pt(2)
+            r_tit = p_tit.add_run("PESQUISA DE MERCADO - MEMÓRIA DE CÁLCULO")
+            r_tit.bold = True
+            r_tit.font.name = "Arial"
+            r_tit.font.size = Pt(10)
+
+            # Barra azul técnica
+            p_bar = doc.add_paragraph()
+            p_bar.paragraph_format.space_before = Pt(0)
+            p_bar.paragraph_format.space_after = Pt(4)
+            pBrd = parse_xml(
+                f'<w:pBrd {nsdecls("w")}>'
+                f'<w:bottom w:val="single" w:sz="12" w:space="1" w:color="245D8C"/>'
+                f'</w:pBrd>'
+            )
+            p_bar._p.get_or_add_pPr().append(pBrd)
 
             tabela = doc.add_table(rows=0, cols=2)
             tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -613,7 +594,7 @@ class AppPesquisaMercado:
 
             lote = self.dados_pesquisas[i:i+2]
             for dado in lote:
-                un = dado.get("Unidade", "ha")
+                un = dado.get("Unidade", "m²")
                 row = tabela.add_row()
                 celula_dados, celula_fotos = row.cells[0], row.cells[1]
                 celula_dados.width = Inches(3.7)
@@ -621,86 +602,102 @@ class AppPesquisaMercado:
                 celula_dados.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
                 celula_fotos.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
 
-                p_dados = celula_dados.paragraphs[0]
-                p_dados.paragraph_format.line_spacing = 1.08
+                # Título da Pesquisa NO TOPO e CENTRALIZADO (Arial 10, Negrito)
+                p_num = celula_dados.paragraphs[0]
+                p_num.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p_num.paragraph_format.space_before = Pt(0)
+                p_num.paragraph_format.space_after = Pt(4)
+                r_num = p_num.add_run(f"Pesquisa – {dado['D.']:02d}")
+                r_num.bold = True
+                r_num.font.name = "Arial"
+                r_num.font.size = Pt(10)
+
+                # Parágrafo de conteúdo dos dados em Arial 10
+                p_dados = celula_dados.add_paragraph()
+                p_dados.paragraph_format.line_spacing = 1.10
+                p_dados.paragraph_format.space_before = Pt(0)
                 p_dados.paragraph_format.space_after = Pt(0)
 
                 def add_f_line(p, label, val):
                     r1 = p.add_run(label)
                     r1.bold = True
                     r1.font.name = "Arial"
-                    r1.font.size = Pt(8.5)
+                    r1.font.size = Pt(10)
                     r2 = p.add_run(f" {val}\n")
                     r2.font.name = "Arial"
-                    r2.font.size = Pt(8.5)
+                    r2.font.size = Pt(10)
 
                 add_f_line(p_dados, "Logradouro:", dado.get("Endereço", ""))
-                if dado.get("Bairro"):
-                    add_f_line(p_dados, "Bairro:", dado.get("Bairro", ""))
+                add_f_line(p_dados, "Bairro:", dado.get("Bairro", ""))
                 add_f_line(p_dados, "Município:", dado.get("Município", ""))
                 add_f_line(p_dados, "Contato:", f"{dado.get('Telefone', '')} - {dado.get('Informante', '')}")
                 add_f_line(p_dados, "Link:", dado.get("Link", ""))
                 p_dados.add_run("\n")
 
-                add_f_line(p_dados, "Área Terreno:", f"{dado.get(f'Área Terreno ({un})', 0):,.3f} {un}" if un == "ha" else f"{dado.get(f'Área Terreno ({un})', 0):,.2f} {un}")
+                add_f_line(p_dados, "Área Terreno:", f"{dado.get(f'Área Terreno ({un})', 0):,.2f} {un}" if un == "m²" else f"{dado.get(f'Área Terreno ({un})', 0):,.3f} {un}")
                 add_f_line(p_dados, "Área Construída:", f"{dado.get('Área Construída (m²)', 0):,.2f} m²")
                 add_f_line(p_dados, "Valor da Oferta:", f"R$ {dado.get('Valor Total (R$)', 0):,.2f}")
                 add_f_line(p_dados, f"Valor Unitário/{un}:", f"R$ {dado.get(f'Unitário (R$/{un})', 0):,.2f}/{un}")
                 p_dados.add_run("\n")
 
-                for v_cfg in self.variaveis_config[:4]:
+                for v_cfg in self.variaveis_config:
                     v_nome = v_cfg["nome"]
                     v_val = dado.get("VariaveisExtras", {}).get(v_nome, dado.get(v_nome, ""))
                     add_f_line(p_dados, f"{v_nome}:", v_val)
 
-                add_f_line(p_dados, "Coordenadas Geográfica:", f"{dado.get('Coord. E (m)', '')} m E / {dado.get('Coord. S (m)', '')} m S")
-                add_f_line(p_dados, "Localização:", dado.get("Localização", "Rural"))
+                # Formatação das Coordenadas Geográficas com Zona UTM
+                zona_str = f"{dado.get('Zona UTM', '').strip()} " if dado.get('Zona UTM') else ""
+                coord_texto = f"{zona_str}{dado.get('Coord. E (m)', '')} m E / {dado.get('Coord. S (m)', '')} m S"
+                add_f_line(p_dados, "Coordenadas Geográfica:", coord_texto)
+                add_f_line(p_dados, "Localização:", dado.get("Localização", "Urbana"))
                 p_dados.add_run("\n")
                 add_f_line(p_dados, "Data:", dado.get("Data", ""))
 
-                p_num = celula_dados.add_paragraph()
-                p_num.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                r_num = p_num.add_run(f"Pesquisa – {dado['D.']:02d}")
-                r_num.bold = True
-                r_num.font.name = "Arial"
-                r_num.font.size = Pt(8.5)
-
-                # Mantém rigorosamente as fotos com o mesmo dimensionamento
+                # Inserção das Fotos (Dimensão reduzida e balanceada)
                 img1 = self._baixar_imagem(dado.get("Foto1"))
                 img2 = self._baixar_imagem(dado.get("Foto2"))
 
                 p_foto = celula_fotos.paragraphs[0]
                 p_foto.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p_foto.paragraph_format.space_before = Pt(2)
+                p_foto.paragraph_format.space_after = Pt(2)
 
                 if img1 and img2:
                     try:
-                        p_foto.add_run().add_picture(img1, width=Inches(3.3))
+                        p_foto.add_run().add_picture(img1, width=Inches(2.75))
                     except Exception:
                         p_foto.add_run("[ Erro na Foto 1 ]\n")
 
                     p_foto2 = celula_fotos.add_paragraph()
                     p_foto2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p_foto2.paragraph_format.space_before = Pt(2)
+                    p_foto2.paragraph_format.space_after = Pt(2)
                     try:
-                        p_foto2.add_run().add_picture(img2, width=Inches(3.3))
+                        p_foto2.add_run().add_picture(img2, width=Inches(2.75))
                     except Exception:
                         p_foto2.add_run("[ Erro na Foto 2 ]")
                 elif img1:
                     try:
-                        p_foto.add_run().add_picture(img1, width=Inches(3.4), height=Inches(3.2))
+                        p_foto.add_run().add_picture(img1, width=Inches(2.75))
                     except Exception:
                         p_foto.add_run("[ Erro na Foto 1 ]")
                 elif img2:
                     try:
-                        p_foto.add_run().add_picture(img2, width=Inches(3.4), height=Inches(3.2))
+                        p_foto.add_run().add_picture(img2, width=Inches(2.75))
                     except Exception:
                         p_foto.add_run("[ Erro na Foto 2 ]")
                 else:
-                    p_foto.add_run("[ Sem fotos anexadas ]")
+                    r_vazio = p_foto.add_run("[ Sem fotos anexadas ]")
+                    r_vazio.font.name = "Arial"
+                    r_vazio.font.size = Pt(10)
 
         doc.save(caminho)
         messagebox.showinfo("Exportação Concluída", "Fichas de Pesquisa no Word geradas com sucesso!")
 
 if __name__ == "__main__":
+    root = tk.Tk()
+    app = AppPesquisaMercado(root)
+    root.mainloop()
     root = tk.Tk()
     app = AppPesquisaMercado(root)
     root.mainloop()
