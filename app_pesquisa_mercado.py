@@ -123,7 +123,7 @@ def normalizar_dado(dado):
     zona_utm = dado.get("zona_utm") or dado.get("Zona UTM") or ""
     coord_e = dado.get("coord_e") or dado.get("Coord. E (m)") or ""
     coord_s = dado.get("coord_s") or dado.get("Coord. S (m)") or ""
-    data = dado.get("data") or dado.get("Data") or "18/09/2026"
+    data = dado.get("data") or dado.get("Data") or "18/08/2026"
     link = dado.get("link") or dado.get("Link") or ""
     foto1 = dado.get("foto1") or dado.get("Foto1") or ""
     foto2 = dado.get("foto2") or dado.get("Foto2") or ""
@@ -212,7 +212,6 @@ class AppPesquisaMercado:
         except Exception as e:
             messagebox.showerror("Erro ao salvar variáveis", str(e))
 
-    # --- HUB INICIAL ---
     def _exibir_tela_hub(self):
         self._limpar_container()
         self.root.config(menu="")
@@ -276,7 +275,6 @@ class AppPesquisaMercado:
     def _importar_planilha_hub(self):
         self._popup_escolha_modelo(callback_pos_confirmacao=self._importar_planilha_excel)
 
-    # --- ÁREA DE TRABALHO ---
     def _exibir_tela_trabalho(self):
         self._limpar_container()
         self._criar_menu_superior()
@@ -767,7 +765,6 @@ class AppPesquisaMercado:
     def _abrir_projeto_menu(self):
         self._executar_abertura_json()
 
-    # --- IMPORTAÇÃO DE PLANILHAS ---
     def _importar_planilha_excel(self):
         caminho = filedialog.askopenfilename(filetypes=[("Planilhas Excel", "*.xlsx;*.xls")])
         if not caminho:
@@ -871,7 +868,6 @@ class AppPesquisaMercado:
         except Exception as e:
             messagebox.showerror("Erro na Importação", f"Falha ao ler a planilha: {e}")
 
-    # --- DOWNLOADS E EXPORTAÇÃO ---
     def _baixar_imagem(self, caminho_ou_url):
         if not caminho_ou_url:
             return None
@@ -965,16 +961,29 @@ class AppPesquisaMercado:
 
             section = doc.sections[0]
             if modelo_selecionado == "COPASA":
-                # Dimensões e margens rigorosamente iguais a Pesquisa Ibirité_Ok
+                # Configurações de página idênticas a Pesquisa Ibirité_Ok
                 section.top_margin = Inches(0.39375)
                 section.bottom_margin = Inches(0.39375)
                 section.left_margin = Inches(1.18125)
                 section.right_margin = Inches(1.18125)
 
-                # Cabeçalho Oficial no cabeçalho nativo da seção Word (repete em todas as páginas)
+                # Page Border externa a 24pt contornando a página
+                sectPr = section._sectPr
+                for child in list(sectPr):
+                    if child.tag.endswith("pgBorders"):
+                        sectPr.remove(child)
+                pgBrd = parse_xml(
+                    f'<w:pgBorders {nsdecls("w")} w:offsetFrom="page">'
+                    f'<w:top w:val="single" w:sz="4" w:space="24" w:color="auto"/>'
+                    f'<w:left w:val="single" w:sz="4" w:space="24" w:color="auto"/>'
+                    f'<w:bottom w:val="single" w:sz="4" w:space="24" w:color="auto"/>'
+                    f'<w:right w:val="single" w:sz="4" w:space="24" w:color="auto"/>'
+                    f'</w:pgBorders>'
+                )
+                sectPr.append(pgBrd)
+
+                # Cabeçalho Oficial
                 hdr = section.header
-                
-                # Tabela 0 do cabeçalho: Logos ENPROL e copasa
                 t_logos = hdr.add_table(rows=1, cols=2, width=Inches(6.37))
                 t_logos.alignment = WD_TABLE_ALIGNMENT.CENTER
                 c_l1, c_l2 = t_logos.cell(0, 0), t_logos.cell(0, 1)
@@ -1005,19 +1014,18 @@ class AppPesquisaMercado:
                     try:
                         p_l2.add_run().add_picture("logo_copasa.png", height=Inches(0.42))
                     except Exception:
-                        r = p_l2.add_run("copasa")
-                        r.bold = True
-                        r.font.name = "Arial"
-                        r.font.size = Pt(13)
-                        r.font.color.rgb = RGBColor(50, 110, 180)
+                        r2 = p_l2.add_run("copasa")
+                        r2.bold = True
+                        r2.font.name = "Arial"
+                        r2.font.size = Pt(13)
+                        r2.font.color.rgb = RGBColor(50, 110, 180)
                 else:
-                    r = p_l2.add_run("copasa")
-                    r.bold = True
-                    r.font.name = "Arial"
-                    r.font.size = Pt(13)
-                    r.font.color.rgb = RGBColor(50, 110, 180)
+                    r2 = p_l2.add_run("copasa")
+                    r2.bold = True
+                    r2.font.name = "Arial"
+                    r2.font.size = Pt(13)
+                    r2.font.color.rgb = RGBColor(50, 110, 180)
 
-                # Tabela 1 do cabeçalho: Faixa azul sólida `#4472C4`
                 t_faixa = hdr.add_table(rows=1, cols=3, width=Inches(6.37))
                 t_faixa.alignment = WD_TABLE_ALIGNMENT.CENTER
                 c_f0, c_f1, c_f2 = t_faixa.cell(0, 0), t_faixa.cell(0, 1), t_faixa.cell(0, 2)
@@ -1048,7 +1056,6 @@ class AppPesquisaMercado:
                 rf2.font.size = Pt(9.5)
                 rf2.font.color.rgb = RGBColor(255, 255, 255)
 
-                # Espaço entre o cabeçalho e a tabela do corpo
                 p_sp_hdr = hdr.add_paragraph()
                 p_sp_hdr.paragraph_format.space_before = Pt(0)
                 p_sp_hdr.paragraph_format.space_after = Pt(4)
@@ -1059,7 +1066,7 @@ class AppPesquisaMercado:
                 section.left_margin = Inches(0.55)
                 section.right_margin = Inches(0.55)
 
-            # Processamento das pesquisas no corpo do documento
+            # Montagem das Pesquisas
             for i in range(0, total_dados, 2):
                 if i > 0:
                     doc.add_page_break()
@@ -1088,7 +1095,6 @@ class AppPesquisaMercado:
                         p_sp.paragraph_format.space_before = Pt(0)
                         p_sp.paragraph_format.space_after = Pt(4)
 
-                # Montagem da Tabela Principal
                 tabela = doc.add_table(rows=0, cols=2)
                 tabela.style = 'Table Grid'
                 tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -1102,7 +1108,6 @@ class AppPesquisaMercado:
                     col0_w = Inches(2.95) if modelo_selecionado == "COPASA" else Inches(3.70)
                     col1_w = Inches(3.42) if modelo_selecionado == "COPASA" else Inches(3.70)
 
-                    # Linha 1: Dados + Foto
                     r_dados = tabela.add_row()
                     c_dados, c_foto = r_dados.cells[0], r_dados.cells[1]
                     c_dados.width = col0_w
@@ -1180,7 +1185,7 @@ class AppPesquisaMercado:
                         add_f_line(p_corpo, "Data:", dado.get("data") or dado.get("Data", ""))
 
                     else:
-                        # MODELO 2: COPASA (Estrutura idêntica a Pesquisa Ibirité_Ok)
+                        # MODELO 2: COPASA (Dados)
                         add_f_line(p_dados, "Logradouro:", dado.get("endereco") or dado.get("Endereço", ""))
                         add_f_line(p_dados, "Bairro:", dado.get("bairro") or dado.get("Bairro", ""))
                         add_f_line(p_dados, "Município:", dado.get("municipio") or dado.get("Município", ""))
@@ -1251,21 +1256,21 @@ class AppPesquisaMercado:
                         r_vazio.font.name = "Arial"
                         r_vazio.font.size = Pt(10)
 
-                    # ARQUITETURA DE BORDAS EXATAS (PESQUISA IBIRITÉ_OK)
+                    # BORDAS EXATAS DE PESQUISA IBIRITÉ_OK
                     if modelo_selecionado == "COPASA":
-                        # 1. Tira a divisória vertical entre colunas e a linha entre dados e "Pesquisa 01"
+                        # Remove a divisória vertical central e a linha acima de Pesquisa 01
                         tcPr_dados = c_dados._tc.get_or_add_tcPr()
                         tcPr_dados.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:bottom w:val="nil"/><w:right w:val="nil"/></w:tcBorders>'))
 
                         tcPr_foto = c_foto._tc.get_or_add_tcPr()
                         tcPr_foto.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="nil"/><w:bottom w:val="nil"/></w:tcBorders>'))
 
-                        # 2. Linha inferior com "Pesquisa 01" mesclada
+                        # Linha inferior com "Pesquisa 01" mesclada em largura total
                         r_lbl = tabela.add_row()
                         c_m = r_lbl.cells[0].merge(r_lbl.cells[1])
                         c_m.width = Inches(6.37)
                         
-                        # Remove a borda superior para não criar quadrado
+                        # Anula a borda superior para não formar quadrado
                         tcPr_m = c_m._tc.get_or_add_tcPr()
                         tcPr_m.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:top w:val="nil"/></w:tcBorders>'))
 
