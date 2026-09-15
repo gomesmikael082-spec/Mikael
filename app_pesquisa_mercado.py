@@ -961,13 +961,12 @@ class AppPesquisaMercado:
 
             section = doc.sections[0]
             if modelo_selecionado == "COPASA":
-                # Configurações de página idênticas a Pesquisa Ibirité_Ok
                 section.top_margin = Inches(0.39375)
                 section.bottom_margin = Inches(0.39375)
                 section.left_margin = Inches(1.18125)
                 section.right_margin = Inches(1.18125)
 
-                # Page Border externa a 24pt contornando a página
+                # Page Border externa oficial (24pt de recuo com traço fino)
                 sectPr = section._sectPr
                 for child in list(sectPr):
                     if child.tag.endswith("pgBorders"):
@@ -984,11 +983,11 @@ class AppPesquisaMercado:
 
                 # Cabeçalho Oficial
                 hdr = section.header
-                t_logos = hdr.add_table(rows=1, cols=2, width=Inches(6.37))
+                t_logos = hdr.add_table(rows=1, cols=2, width=Inches(5.90))
                 t_logos.alignment = WD_TABLE_ALIGNMENT.CENTER
                 c_l1, c_l2 = t_logos.cell(0, 0), t_logos.cell(0, 1)
-                c_l1.width = Inches(3.18)
-                c_l2.width = Inches(3.18)
+                c_l1.width = Inches(2.95)
+                c_l2.width = Inches(2.95)
 
                 p_l1 = c_l1.paragraphs[0]
                 p_l1.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -1026,34 +1025,55 @@ class AppPesquisaMercado:
                     r2.font.size = Pt(13)
                     r2.font.color.rgb = RGBColor(50, 110, 180)
 
-                t_faixa = hdr.add_table(rows=1, cols=3, width=Inches(6.37))
+                # Faixa azul: altura compacta idêntica a Pesquisa Ibirité_Ok
+                t_faixa = hdr.add_table(rows=1, cols=3, width=Inches(5.90))
                 t_faixa.alignment = WD_TABLE_ALIGNMENT.CENTER
+                t_faixa.autofit = False
+
+                tblPr_f = t_faixa._tbl.tblPr
+                tblCellMar = parse_xml(
+                    f'<w:tblCellMar {nsdecls("w")}>'
+                    f'<w:top w:w="0" w:type="dxa"/>'
+                    f'<w:left w:w="108" w:type="dxa"/>'
+                    f'<w:bottom w:w="0" w:type="dxa"/>'
+                    f'<w:right w:w="108" w:type="dxa"/>'
+                    f'</w:tblCellMar>'
+                )
+                tblPr_f.append(tblCellMar)
+
                 c_f0, c_f1, c_f2 = t_faixa.cell(0, 0), t_faixa.cell(0, 1), t_faixa.cell(0, 2)
-                c_f0.width = Inches(2.0)
-                c_f1.width = Inches(2.37)
-                c_f2.width = Inches(2.0)
+                c_f0.width = Inches(1.77)
+                c_f1.width = Inches(2.16)
+                c_f2.width = Inches(1.97)
 
                 for c_f in (c_f0, c_f1, c_f2):
-                    shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="4472C4"/>')
+                    shd = parse_xml(f'<w:shd {nsdecls("w")} w:val="clear" w:color="auto" w:fill="4472C4"/>')
                     c_f._tc.get_or_add_tcPr().append(shd)
 
                 pf0 = c_f0.paragraphs[0]
-                pf0.paragraph_format.space_before = Pt(2)
-                pf0.paragraph_format.space_after = Pt(2)
+                pf0.paragraph_format.space_before = Pt(0)
+                pf0.paragraph_format.space_after = Pt(0)
+                pf0.paragraph_format.line_spacing = 1.0
                 rf0 = pf0.add_run("CONTRATO: COPASA I")
                 rf0.bold = True
                 rf0.font.name = "Arial"
-                rf0.font.size = Pt(9.5)
+                rf0.font.size = Pt(10)
                 rf0.font.color.rgb = RGBColor(255, 255, 255)
+
+                pf1 = c_f1.paragraphs[0]
+                pf1.paragraph_format.space_before = Pt(0)
+                pf1.paragraph_format.space_after = Pt(0)
+                pf1.paragraph_format.line_spacing = 1.0
 
                 pf2 = c_f2.paragraphs[0]
                 pf2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                pf2.paragraph_format.space_before = Pt(2)
-                pf2.paragraph_format.space_after = Pt(2)
+                pf2.paragraph_format.space_before = Pt(0)
+                pf2.paragraph_format.space_after = Pt(0)
+                pf2.paragraph_format.line_spacing = 1.0
                 rf2 = pf2.add_run("PESQUISA DE MERCADO")
                 rf2.bold = True
                 rf2.font.name = "Arial"
-                rf2.font.size = Pt(9.5)
+                rf2.font.size = Pt(10)
                 rf2.font.color.rgb = RGBColor(255, 255, 255)
 
                 p_sp_hdr = hdr.add_paragraph()
@@ -1066,7 +1086,7 @@ class AppPesquisaMercado:
                 section.left_margin = Inches(0.55)
                 section.right_margin = Inches(0.55)
 
-            # Montagem das Pesquisas
+            # Montagem das Fichas de Pesquisa
             for i in range(0, total_dados, 2):
                 if i > 0:
                     doc.add_page_break()
@@ -1185,7 +1205,6 @@ class AppPesquisaMercado:
                         add_f_line(p_corpo, "Data:", dado.get("data") or dado.get("Data", ""))
 
                     else:
-                        # MODELO 2: COPASA (Dados)
                         add_f_line(p_dados, "Logradouro:", dado.get("endereco") or dado.get("Endereço", ""))
                         add_f_line(p_dados, "Bairro:", dado.get("bairro") or dado.get("Bairro", ""))
                         add_f_line(p_dados, "Município:", dado.get("municipio") or dado.get("Município", ""))
@@ -1222,7 +1241,6 @@ class AppPesquisaMercado:
                         p_dados.add_run("\n")
                         add_f_line(p_dados, "Data:", dado.get("data") or dado.get("Data", "18/08/2026"))
 
-                    # Inserção das Fotos
                     img1 = self._baixar_imagem(dado.get("foto1") or dado.get("Foto1"))
                     img2 = self._baixar_imagem(dado.get("foto2") or dado.get("Foto2"))
 
@@ -1256,21 +1274,17 @@ class AppPesquisaMercado:
                         r_vazio.font.name = "Arial"
                         r_vazio.font.size = Pt(10)
 
-                    # BORDAS EXATAS DE PESQUISA IBIRITÉ_OK
                     if modelo_selecionado == "COPASA":
-                        # Remove a divisória vertical central e a linha acima de Pesquisa 01
                         tcPr_dados = c_dados._tc.get_or_add_tcPr()
                         tcPr_dados.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:bottom w:val="nil"/><w:right w:val="nil"/></w:tcBorders>'))
 
                         tcPr_foto = c_foto._tc.get_or_add_tcPr()
                         tcPr_foto.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="nil"/><w:bottom w:val="nil"/></w:tcBorders>'))
 
-                        # Linha inferior com "Pesquisa 01" mesclada em largura total
                         r_lbl = tabela.add_row()
                         c_m = r_lbl.cells[0].merge(r_lbl.cells[1])
                         c_m.width = Inches(6.37)
                         
-                        # Anula a borda superior para não formar quadrado
                         tcPr_m = c_m._tc.get_or_add_tcPr()
                         tcPr_m.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:top w:val="nil"/></w:tcBorders>'))
 
