@@ -31,7 +31,7 @@ DEFAULT_VARS_PADRAO = [
 
 DEFAULT_VARS_COPASA = [
     {"nome": "Frente", "tipo": "texto", "opcoes": ["Não informado"]},
-    {"nome": "Via de acesso", "tipo": "texto", "opcoes": []},
+    {"nome": "Via de acesso", "tipo": "texto", "opcoes": ["pavimentada", "não pavimentada"]},
     {"nome": "Informações", "tipo": "texto", "opcoes": []}
 ]
 
@@ -86,7 +86,6 @@ def normalizar_url_gdrive(url):
     return url
 
 def normalizar_dado(dado):
-    """Garante compatibilidade total entre arquivos JSON antigos e novos."""
     d_id = dado.get("dado_id") if dado.get("dado_id") is not None else dado.get("D.", 1)
     informante = dado.get("informante") or dado.get("Informante") or ""
     telefone = dado.get("telefone") or dado.get("Telefone") or ""
@@ -213,7 +212,7 @@ class AppPesquisaMercado:
         except Exception as e:
             messagebox.showerror("Erro ao salvar variáveis", str(e))
 
-    # --- TELA 1: HUB INICIAL ---
+    # --- HUB INICIAL ---
     def _exibir_tela_hub(self):
         self._limpar_container()
         self.root.config(menu="")
@@ -277,7 +276,7 @@ class AppPesquisaMercado:
     def _importar_planilha_hub(self):
         self._popup_escolha_modelo(callback_pos_confirmacao=self._importar_planilha_excel)
 
-    # --- TELA 2: ÁREA DE TRABALHO ---
+    # --- ÁREA DE TRABALHO ---
     def _exibir_tela_trabalho(self):
         self._limpar_container()
         self._criar_menu_superior()
@@ -367,7 +366,7 @@ class AppPesquisaMercado:
 
         ttk.Label(frame_coords, text="Data:").pack(side="left", padx=(0, 2))
         self.txt_data = ttk.Entry(frame_coords, width=12)
-        self.txt_data.insert(0, "18/09/2026")
+        self.txt_data.insert(0, "18/08/2026")
         self.txt_data.pack(side="left")
 
         ttk.Label(frame_form, text="Link do Anúncio:").grid(row=5, column=0, sticky="w")
@@ -384,7 +383,6 @@ class AppPesquisaMercado:
         self.txt_foto2.grid(row=7, column=1, columnspan=2, sticky="w", padx=4, pady=2)
         ttk.Button(frame_form, text="Buscar", command=lambda: self._buscar_arquivo_foto(self.txt_foto2)).grid(row=7, column=3, sticky="w")
 
-        # Variáveis Dinâmicas
         self.frame_vars = ttk.LabelFrame(self.container_principal, text=" Variáveis da Avaliação ", padding=8)
         self.frame_vars.pack(fill="x", padx=10, pady=3)
         self.widgets_dinamicos = {}
@@ -402,7 +400,6 @@ class AppPesquisaMercado:
 
         ttk.Button(frame_btn_cad, text="⚙ Configurar Variáveis", command=self._janela_config_variaveis).pack(side="right", padx=4)
 
-        # Tabela
         frame_tabela = ttk.LabelFrame(self.container_principal, text=" Dados Cadastrados (Clique duplo para editar) ", padding=8)
         frame_tabela.pack(fill="both", expand=True, padx=10, pady=3)
 
@@ -540,7 +537,7 @@ class AppPesquisaMercado:
         self.txt_coord_e.delete(0, tk.END)
         self.txt_coord_s.delete(0, tk.END)
         self.txt_data.delete(0, tk.END)
-        self.txt_data.insert(0, "18/09/2026")
+        self.txt_data.insert(0, "18/08/2026")
         self.txt_link.delete(0, tk.END)
         self.txt_foto1.delete(0, tk.END)
         self.txt_foto2.delete(0, tk.END)
@@ -770,7 +767,7 @@ class AppPesquisaMercado:
     def _abrir_projeto_menu(self):
         self._executar_abertura_json()
 
-    # --- IMPORTADOR INTELIGENTE DE PLANILHAS EXCEL ---
+    # --- IMPORTAÇÃO DE PLANILHAS ---
     def _importar_planilha_excel(self):
         caminho = filedialog.askopenfilename(filetypes=[("Planilhas Excel", "*.xlsx;*.xls")])
         if not caminho:
@@ -850,7 +847,7 @@ class AppPesquisaMercado:
                     "zona_utm": str(row.get(mapeamento.get("zona_utm", ""), "")).replace("nan", "").strip(),
                     "coord_e": limpar_sufixo_coord(str(row.get(mapeamento.get("coord_e", ""), "")).replace("nan", "")),
                     "coord_s": limpar_sufixo_coord(str(row.get(mapeamento.get("coord_s", ""), "")).replace("nan", "")),
-                    "data": str(row.get(mapeamento.get("data", "18/09/2026"))).replace("nan", "").strip(),
+                    "data": str(row.get(mapeamento.get("data", "18/08/2026"))).replace("nan", "").strip(),
                     "link": str(row.get(mapeamento.get("link", ""), "")).replace("nan", "").strip(),
                     "foto1": "",
                     "foto2": "",
@@ -938,36 +935,6 @@ class AppPesquisaMercado:
 
         messagebox.showinfo("Sucesso", "Planilha exportada com sucesso!")
 
-    def _definir_bordas_card_padrao(self, table):
-        """Bordas da tabela do Modelo 1: retângulo externo e separador horizontal entre pesquisas."""
-        tblPr = table._tbl.tblPr
-        borders = parse_xml(
-            f'<w:tblBorders {nsdecls("w")}>'
-            f'<w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:bottom w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:left w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:right w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:insideH w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:insideV w:val="none"/>'
-            f'</w:tblBorders>'
-        )
-        tblPr.append(borders)
-
-    def _definir_bordas_card_copasa(self, table):
-        """Bordas exclusivas da tabela COPASA: moldura externa retangular pura (SEM divisórias internas)."""
-        tblPr = table._tbl.tblPr
-        borders = parse_xml(
-            f'<w:tblBorders {nsdecls("w")}>'
-            f'<w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:bottom w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:left w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:right w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
-            f'<w:insideH w:val="none"/>'
-            f'<w:insideV w:val="none"/>'
-            f'</w:tblBorders>'
-        )
-        tblPr.append(borders)
-
     def _iniciar_exportacao_word_thread(self):
         if not self.dados_pesquisas:
             messagebox.showwarning("Aviso", "Nenhum dado cadastrado para exportação.")
@@ -996,23 +963,107 @@ class AppPesquisaMercado:
             doc = Document()
             total_dados = len(dados_lista)
 
-            for section in doc.sections:
-                if modelo_selecionado == "COPASA":
-                    section.top_margin = Inches(0.55)
-                    section.bottom_margin = Inches(0.55)
-                    section.left_margin = Inches(0.70)
-                    section.right_margin = Inches(0.70)
-                else:
-                    section.top_margin = Inches(0.35)
-                    section.bottom_margin = Inches(0.35)
-                    section.left_margin = Inches(0.55)
-                    section.right_margin = Inches(0.55)
+            section = doc.sections[0]
+            if modelo_selecionado == "COPASA":
+                # Dimensões e margens rigorosamente iguais a Pesquisa Ibirité_Ok
+                section.top_margin = Inches(0.39375)
+                section.bottom_margin = Inches(0.39375)
+                section.left_margin = Inches(1.18125)
+                section.right_margin = Inches(1.18125)
 
+                # Cabeçalho Oficial no cabeçalho nativo da seção Word (repete em todas as páginas)
+                hdr = section.header
+                
+                # Tabela 0 do cabeçalho: Logos ENPROL e copasa
+                t_logos = hdr.add_table(rows=1, cols=2, width=Inches(6.37))
+                t_logos.alignment = WD_TABLE_ALIGNMENT.CENTER
+                c_l1, c_l2 = t_logos.cell(0, 0), t_logos.cell(0, 1)
+                c_l1.width = Inches(3.18)
+                c_l2.width = Inches(3.18)
+
+                p_l1 = c_l1.paragraphs[0]
+                p_l1.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                if os.path.exists("logo_enprol.png"):
+                    try:
+                        p_l1.add_run().add_picture("logo_enprol.png", height=Inches(0.42))
+                    except Exception:
+                        r = p_l1.add_run("ENPROL")
+                        r.bold = True
+                        r.font.name = "Arial"
+                        r.font.size = Pt(13)
+                        r.font.color.rgb = RGBColor(28, 93, 153)
+                else:
+                    r = p_l1.add_run("ENPROL")
+                    r.bold = True
+                    r.font.name = "Arial"
+                    r.font.size = Pt(13)
+                    r.font.color.rgb = RGBColor(28, 93, 153)
+
+                p_l2 = c_l2.paragraphs[0]
+                p_l2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                if os.path.exists("logo_copasa.png"):
+                    try:
+                        p_l2.add_run().add_picture("logo_copasa.png", height=Inches(0.42))
+                    except Exception:
+                        r = p_l2.add_run("copasa")
+                        r.bold = True
+                        r.font.name = "Arial"
+                        r.font.size = Pt(13)
+                        r.font.color.rgb = RGBColor(50, 110, 180)
+                else:
+                    r = p_l2.add_run("copasa")
+                    r.bold = True
+                    r.font.name = "Arial"
+                    r.font.size = Pt(13)
+                    r.font.color.rgb = RGBColor(50, 110, 180)
+
+                # Tabela 1 do cabeçalho: Faixa azul sólida `#4472C4`
+                t_faixa = hdr.add_table(rows=1, cols=3, width=Inches(6.37))
+                t_faixa.alignment = WD_TABLE_ALIGNMENT.CENTER
+                c_f0, c_f1, c_f2 = t_faixa.cell(0, 0), t_faixa.cell(0, 1), t_faixa.cell(0, 2)
+                c_f0.width = Inches(2.0)
+                c_f1.width = Inches(2.37)
+                c_f2.width = Inches(2.0)
+
+                for c_f in (c_f0, c_f1, c_f2):
+                    shd = parse_xml(f'<w:shd {nsdecls("w")} w:fill="4472C4"/>')
+                    c_f._tc.get_or_add_tcPr().append(shd)
+
+                pf0 = c_f0.paragraphs[0]
+                pf0.paragraph_format.space_before = Pt(2)
+                pf0.paragraph_format.space_after = Pt(2)
+                rf0 = pf0.add_run("CONTRATO: COPASA I")
+                rf0.bold = True
+                rf0.font.name = "Arial"
+                rf0.font.size = Pt(9.5)
+                rf0.font.color.rgb = RGBColor(255, 255, 255)
+
+                pf2 = c_f2.paragraphs[0]
+                pf2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                pf2.paragraph_format.space_before = Pt(2)
+                pf2.paragraph_format.space_after = Pt(2)
+                rf2 = pf2.add_run("PESQUISA DE MERCADO")
+                rf2.bold = True
+                rf2.font.name = "Arial"
+                rf2.font.size = Pt(9.5)
+                rf2.font.color.rgb = RGBColor(255, 255, 255)
+
+                # Espaço entre o cabeçalho e a tabela do corpo
+                p_sp_hdr = hdr.add_paragraph()
+                p_sp_hdr.paragraph_format.space_before = Pt(0)
+                p_sp_hdr.paragraph_format.space_after = Pt(4)
+
+            else:
+                section.top_margin = Inches(0.35)
+                section.bottom_margin = Inches(0.35)
+                section.left_margin = Inches(0.55)
+                section.right_margin = Inches(0.55)
+
+            # Processamento das pesquisas no corpo do documento
             for i in range(0, total_dados, 2):
                 if i > 0:
                     doc.add_page_break()
 
-                # --- CABEÇALHOS ---
                 if modelo_selecionado == "PADRAO":
                     if i == 0:
                         p_tit = doc.add_paragraph()
@@ -1037,114 +1088,29 @@ class AppPesquisaMercado:
                         p_sp.paragraph_format.space_before = Pt(0)
                         p_sp.paragraph_format.space_after = Pt(4)
 
-                    tabela = doc.add_table(rows=0, cols=2)
-                    tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
-                    tabela.autofit = False
-                    self._definir_bordas_card_padrao(tabela)
-
-                elif modelo_selecionado == "COPASA":
-                    t_cab = doc.add_table(rows=1, cols=2)
-                    t_cab.alignment = WD_TABLE_ALIGNMENT.CENTER
-                    t_cab.autofit = False
-                    c_logo1, c_logo2 = t_cab.cell(0, 0), t_cab.cell(0, 1)
-                    c_logo1.width = Inches(3.45)
-                    c_logo2.width = Inches(3.45)
-
-                    p_enp = c_logo1.paragraphs[0]
-                    p_enp.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                    if os.path.exists("logo_enprol.png"):
-                        try:
-                            p_enp.add_run().add_picture("logo_enprol.png", height=Inches(0.40))
-                        except Exception:
-                            r = p_enp.add_run("ENPROL")
-                            r.bold = True
-                            r.font.name = "Arial"
-                            r.font.size = Pt(13)
-                            r.font.color.rgb = RGBColor(28, 93, 153)
-                    else:
-                        r = p_enp.add_run("ENPROL")
-                        r.bold = True
-                        r.font.name = "Arial"
-                        r.font.size = Pt(13)
-                        r.font.color.rgb = RGBColor(28, 93, 153)
-
-                    p_cop = c_logo2.paragraphs[0]
-                    p_cop.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                    if os.path.exists("logo_copasa.png"):
-                        try:
-                            p_cop.add_run().add_picture("logo_copasa.png", height=Inches(0.40))
-                        except Exception:
-                            r2 = p_cop.add_run("copasa")
-                            r2.bold = True
-                            r2.font.name = "Arial"
-                            r2.font.size = Pt(13)
-                            r2.font.color.rgb = RGBColor(50, 110, 180)
-                    else:
-                        r2 = p_cop.add_run("copasa")
-                        r2.bold = True
-                        r2.font.name = "Arial"
-                        r2.font.size = Pt(13)
-                        r2.font.color.rgb = RGBColor(50, 110, 180)
-
-                    t_faixa = doc.add_table(rows=1, cols=2)
-                    t_faixa.alignment = WD_TABLE_ALIGNMENT.CENTER
-                    t_faixa.autofit = False
-                    cf_esq, cf_dir = t_faixa.cell(0, 0), t_faixa.cell(0, 1)
-                    cf_esq.width = Inches(3.45)
-                    cf_dir.width = Inches(3.45)
-
-                    shd_esq = parse_xml(f'<w:shd {nsdecls("w")} w:fill="8FA8D6"/>')
-                    shd_dir = parse_xml(f'<w:shd {nsdecls("w")} w:fill="8FA8D6"/>')
-                    cf_esq._tc.get_or_add_tcPr().append(shd_esq)
-                    cf_dir._tc.get_or_add_tcPr().append(shd_dir)
-
-                    p_fe = cf_esq.paragraphs[0]
-                    p_fe.paragraph_format.space_before = Pt(2)
-                    p_fe.paragraph_format.space_after = Pt(2)
-                    r_fe = p_fe.add_run("  CONTRATO: COPASA |")
-                    r_fe.bold = True
-                    r_fe.font.name = "Arial"
-                    r_fe.font.size = Pt(9)
-                    r_fe.font.color.rgb = RGBColor(255, 255, 255)
-
-                    p_fd = cf_dir.paragraphs[0]
-                    p_fd.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                    p_fd.paragraph_format.space_before = Pt(2)
-                    p_fd.paragraph_format.space_after = Pt(2)
-                    r_fd = p_fd.add_run("PESQUISA DE MERCADO  ")
-                    r_fd.bold = True
-                    r_fd.font.name = "Arial"
-                    r_fd.font.size = Pt(9)
-                    r_fd.font.color.rgb = RGBColor(255, 255, 255)
-
-                    p_espaco = doc.add_paragraph()
-                    p_espaco.paragraph_format.space_before = Pt(0)
-                    p_espaco.paragraph_format.space_after = Pt(3)
+                # Montagem da Tabela Principal
+                tabela = doc.add_table(rows=0, cols=2)
+                tabela.style = 'Table Grid'
+                tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
+                tabela.autofit = False
 
                 lote = dados_lista[i:i+2]
                 for dado in lote:
                     d_id = dado.get("dado_id") or dado.get("D.", 1)
                     un = dado.get("unidade") or dado.get("Unidade", "m²")
 
-                    if modelo_selecionado == "COPASA":
-                        tabela_card = doc.add_table(rows=0, cols=2)
-                        tabela_card.alignment = WD_TABLE_ALIGNMENT.CENTER
-                        tabela_card.autofit = False
-                        self._definir_bordas_card_copasa(tabela_card)
-                        largura_coluna = Inches(3.45)
-                        tabela_alvo = tabela_card
-                    else:
-                        largura_coluna = Inches(3.70)
-                        tabela_alvo = tabela
+                    col0_w = Inches(2.95) if modelo_selecionado == "COPASA" else Inches(3.70)
+                    col1_w = Inches(3.42) if modelo_selecionado == "COPASA" else Inches(3.70)
 
-                    row = tabela_alvo.add_row()
-                    celula_dados, celula_fotos = row.cells[0], row.cells[1]
-                    celula_dados.width = largura_coluna
-                    celula_fotos.width = largura_coluna
-                    celula_dados.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-                    celula_fotos.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                    # Linha 1: Dados + Foto
+                    r_dados = tabela.add_row()
+                    c_dados, c_foto = r_dados.cells[0], r_dados.cells[1]
+                    c_dados.width = col0_w
+                    c_foto.width = col1_w
+                    c_dados.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                    c_foto.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
 
-                    p_dados = celula_dados.paragraphs[0]
+                    p_dados = c_dados.paragraphs[0]
                     p_dados.paragraph_format.line_spacing = 1.08
                     p_dados.paragraph_format.space_before = Pt(2)
                     p_dados.paragraph_format.space_after = Pt(0)
@@ -1165,7 +1131,7 @@ class AppPesquisaMercado:
                         r_top.font.name = "Arial"
                         r_top.font.size = Pt(10)
 
-                        p_corpo = celula_dados.add_paragraph()
+                        p_corpo = c_dados.add_paragraph()
                         p_corpo.paragraph_format.line_spacing = 1.08
                         p_corpo.paragraph_format.space_before = Pt(0)
                         p_corpo.paragraph_format.space_after = Pt(0)
@@ -1214,14 +1180,15 @@ class AppPesquisaMercado:
                         add_f_line(p_corpo, "Data:", dado.get("data") or dado.get("Data", ""))
 
                     else:
-                        # MODELO 2: COPASA (Dados)
+                        # MODELO 2: COPASA (Estrutura idêntica a Pesquisa Ibirité_Ok)
                         add_f_line(p_dados, "Logradouro:", dado.get("endereco") or dado.get("Endereço", ""))
                         add_f_line(p_dados, "Bairro:", dado.get("bairro") or dado.get("Bairro", ""))
                         add_f_line(p_dados, "Município:", dado.get("municipio") or dado.get("Município", ""))
                         p_dados.add_run("\n")
 
                         extras = dado.get("variaveis_extras") or dado.get("VariaveisExtras", {})
-                        add_f_line(p_dados, "Informações:", extras.get("Informações", dado.get("Informações", "")))
+                        info_val = extras.get("Informações", dado.get("Informações", ""))
+                        add_f_line(p_dados, "Informações:", info_val)
                         p_dados.add_run("\n")
 
                         a_terr = dado.get("area_terreno") if dado.get("area_terreno") is not None else (dado.get("Área Terreno (m²)") or 0.0)
@@ -1232,7 +1199,7 @@ class AppPesquisaMercado:
 
                         add_f_line(p_dados, "Frente:", extras.get("Frente", dado.get("Frente", "Não informado")))
                         p_dados.add_run("\n")
-                        add_f_line(p_dados, "Via de acesso:", extras.get("Via de acesso", dado.get("Via de acesso", "")))
+                        add_f_line(p_dados, "Via de acesso:", extras.get("Via de acesso", dado.get("Via de acesso", "pavimentada")))
 
                         zona_val = dado.get("zona_utm") or dado.get("Zona UTM", "")
                         zona_str = f"{str(zona_val).strip()} " if zona_val else ""
@@ -1243,21 +1210,21 @@ class AppPesquisaMercado:
                         p_dados.add_run("\n")
 
                         u_val = dado.get("unitario") if dado.get("unitario") is not None else (dado.get("Unitário (R$/m²)") or 0.0)
-                        add_f_line(p_dados, "Valor Unitário:", f"R$ {formatar_moeda_br(u_val)}/m²")
+                        add_f_line(p_dados, "Valor Unitário:", f"R$/m² {formatar_numero_br(u_val, 2)}")
 
                         v_tot = dado.get("valor_total") if dado.get("valor_total") is not None else dado.get("Valor Total (R$)", 0.0)
                         add_f_line(p_dados, "Valor Total:", f"R$ {formatar_moeda_br(v_tot)}")
                         p_dados.add_run("\n")
-                        add_f_line(p_dados, "Data:", dado.get("data") or dado.get("Data", ""))
+                        add_f_line(p_dados, "Data:", dado.get("data") or dado.get("Data", "18/08/2026"))
 
-                    # Fotos
+                    # Inserção das Fotos
                     img1 = self._baixar_imagem(dado.get("foto1") or dado.get("Foto1"))
                     img2 = self._baixar_imagem(dado.get("foto2") or dado.get("Foto2"))
 
-                    p_foto = celula_fotos.paragraphs[0]
+                    p_foto = c_foto.paragraphs[0]
                     p_foto.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-                    largura_foto = Inches(2.65) if modelo_selecionado == "COPASA" else Inches(2.75)
+                    largura_foto = Inches(3.30) if modelo_selecionado == "COPASA" else Inches(2.75)
 
                     if img1 and img2:
                         try:
@@ -1265,7 +1232,7 @@ class AppPesquisaMercado:
                         except Exception:
                             p_foto.add_run("[ Erro na Foto 1 ]\n")
 
-                        p_foto2 = celula_fotos.add_paragraph()
+                        p_foto2 = c_foto.add_paragraph()
                         p_foto2.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         p_foto2.paragraph_format.space_before = Pt(2)
                         try:
@@ -1284,18 +1251,31 @@ class AppPesquisaMercado:
                         r_vazio.font.name = "Arial"
                         r_vazio.font.size = Pt(10)
 
-                    # No MODELO COPASA: "Pesquisa 01" limpa, sem divisória acima
+                    # ARQUITETURA DE BORDAS EXATAS (PESQUISA IBIRITÉ_OK)
                     if modelo_selecionado == "COPASA":
-                        row_lbl = tabela_alvo.add_row()
-                        cel_mesclada = row_lbl.cells[0].merge(row_lbl.cells[1])
-                        p_cop_num = cel_mesclada.paragraphs[0]
-                        p_cop_num.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        p_cop_num.paragraph_format.space_before = Pt(6)
-                        p_cop_num.paragraph_format.space_after = Pt(2)
-                        r_c_num = p_cop_num.add_run(f"Pesquisa {d_id:02d}")
-                        r_c_num.bold = True
-                        r_c_num.font.name = "Arial"
-                        r_c_num.font.size = Pt(9.5)
+                        # 1. Tira a divisória vertical entre colunas e a linha entre dados e "Pesquisa 01"
+                        tcPr_dados = c_dados._tc.get_or_add_tcPr()
+                        tcPr_dados.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:bottom w:val="nil"/><w:right w:val="nil"/></w:tcBorders>'))
+
+                        tcPr_foto = c_foto._tc.get_or_add_tcPr()
+                        tcPr_foto.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="nil"/><w:bottom w:val="nil"/></w:tcBorders>'))
+
+                        # 2. Linha inferior com "Pesquisa 01" mesclada
+                        r_lbl = tabela.add_row()
+                        c_m = r_lbl.cells[0].merge(r_lbl.cells[1])
+                        c_m.width = Inches(6.37)
+                        
+                        # Remove a borda superior para não criar quadrado
+                        tcPr_m = c_m._tc.get_or_add_tcPr()
+                        tcPr_m.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:top w:val="nil"/></w:tcBorders>'))
+
+                        p_lbl = c_m.paragraphs[0]
+                        p_lbl.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        p_lbl.paragraph_format.space_before = Pt(4)
+                        p_lbl.paragraph_format.space_after = Pt(4)
+                        r_num = p_lbl.add_run(f"Pesquisa {d_id:02d}")
+                        r_num.font.name = "Arial"
+                        r_num.font.size = Pt(10)
 
                     progresso = int(((i + 1) / total_dados) * 100)
                     self.root.after(0, lambda p=progresso: self._atualizar_progresso(p))
