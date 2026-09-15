@@ -705,7 +705,7 @@ class AppPesquisaMercado:
 
         extras = dado.get("variaveis_extras") or dado.get("VariaveisExtras", {})
         for nome, widget in self.widgets_dinamicos.items():
-            val = extras.get(nome, dado.get(nome, ""))
+            val = extras.get(nome, "")
             if isinstance(widget, ttk.Combobox):
                 widget.set(val)
             else:
@@ -954,7 +954,7 @@ class AppPesquisaMercado:
         tblPr.append(borders)
 
     def _definir_bordas_card_copasa(self, table):
-        """Bordas do card COPASA: moldura externa sem linha interna no meio e SEM quadrado em Pesquisa 01."""
+        """Bordas exclusivas da tabela COPASA: moldura externa retangular pura (SEM divisórias internas)."""
         tblPr = table._tbl.tblPr
         borders = parse_xml(
             f'<w:tblBorders {nsdecls("w")}>'
@@ -967,22 +967,6 @@ class AppPesquisaMercado:
             f'</w:tblBorders>'
         )
         tblPr.append(borders)
-
-    def _configurar_borda_pagina_copasa(self, section):
-        """Aplica moldura externa retangular ao redor de toda a folha no Modelo COPASA."""
-        sectPr = section._sectPr
-        for child in list(sectPr):
-            if child.tag.endswith("pgBorders"):
-                sectPr.remove(child)
-        pgBrd = parse_xml(
-            f'<w:pgBorders {nsdecls("w")} w:offsetFrom="page">'
-            f'<w:top w:val="single" w:sz="6" w:space="16" w:color="000000"/>'
-            f'<w:left w:val="single" w:sz="6" w:space="16" w:color="000000"/>'
-            f'<w:bottom w:val="single" w:sz="6" w:space="16" w:color="000000"/>'
-            f'<w:right w:val="single" w:sz="6" w:space="16" w:color="000000"/>'
-            f'</w:pgBorders>'
-        )
-        sectPr.append(pgBrd)
 
     def _iniciar_exportacao_word_thread(self):
         if not self.dados_pesquisas:
@@ -1018,7 +1002,6 @@ class AppPesquisaMercado:
                     section.bottom_margin = Inches(0.55)
                     section.left_margin = Inches(0.70)
                     section.right_margin = Inches(0.70)
-                    self._configurar_borda_pagina_copasa(section)
                 else:
                     section.top_margin = Inches(0.35)
                     section.bottom_margin = Inches(0.35)
@@ -1143,7 +1126,6 @@ class AppPesquisaMercado:
                     d_id = dado.get("dado_id") or dado.get("D.", 1)
                     un = dado.get("unidade") or dado.get("Unidade", "m²")
 
-                    # No Modelo COPASA, cada pesquisa é um card limpo sem linha acima de "Pesquisa 01"
                     if modelo_selecionado == "COPASA":
                         tabela_card = doc.add_table(rows=0, cols=2)
                         tabela_card.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -1302,7 +1284,7 @@ class AppPesquisaMercado:
                         r_vazio.font.name = "Arial"
                         r_vazio.font.size = Pt(10)
 
-                    # No MODELO COPASA: "Pesquisa 01" limpa e sem quadrado interno
+                    # No MODELO COPASA: "Pesquisa 01" limpa, sem divisória acima
                     if modelo_selecionado == "COPASA":
                         row_lbl = tabela_alvo.add_row()
                         cel_mesclada = row_lbl.cells[0].merge(row_lbl.cells[1])
