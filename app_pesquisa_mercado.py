@@ -966,7 +966,6 @@ class AppPesquisaMercado:
                 section.left_margin = Inches(1.18125)
                 section.right_margin = Inches(1.18125)
 
-                # Page Border externa oficial (24pt de recuo com traço fino)
                 sectPr = section._sectPr
                 for child in list(sectPr):
                     if child.tag.endswith("pgBorders"):
@@ -981,7 +980,6 @@ class AppPesquisaMercado:
                 )
                 sectPr.append(pgBrd)
 
-                # Cabeçalho Oficial
                 hdr = section.header
                 t_logos = hdr.add_table(rows=1, cols=2, width=Inches(5.90))
                 t_logos.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -1025,7 +1023,7 @@ class AppPesquisaMercado:
                     r2.font.size = Pt(13)
                     r2.font.color.rgb = RGBColor(50, 110, 180)
 
-                # Faixa azul: altura compacta idêntica a Pesquisa Ibirité_Ok
+                # Faixa azul compacta idêntica a Pesquisa Ibirité_Ok
                 t_faixa = hdr.add_table(rows=1, cols=3, width=Inches(5.90))
                 t_faixa.alignment = WD_TABLE_ALIGNMENT.CENTER
                 t_faixa.autofit = False
@@ -1086,7 +1084,6 @@ class AppPesquisaMercado:
                 section.left_margin = Inches(0.55)
                 section.right_margin = Inches(0.55)
 
-            # Montagem das Fichas de Pesquisa
             for i in range(0, total_dados, 2):
                 if i > 0:
                     doc.add_page_break()
@@ -1116,9 +1113,24 @@ class AppPesquisaMercado:
                         p_sp.paragraph_format.space_after = Pt(4)
 
                 tabela = doc.add_table(rows=0, cols=2)
-                tabela.style = 'Table Grid'
                 tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
                 tabela.autofit = False
+
+                if modelo_selecionado == "PADRAO":
+                    tblPr_p = tabela._tbl.tblPr
+                    borders_p = parse_xml(
+                        f'<w:tblBorders {nsdecls("w")}>'
+                        f'<w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
+                        f'<w:bottom w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
+                        f'<w:left w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
+                        f'<w:right w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
+                        f'<w:insideH w:val="single" w:sz="6" w:space="0" w:color="000000"/>'
+                        f'<w:insideV w:val="none"/>'
+                        f'</w:tblBorders>'
+                    )
+                    tblPr_p.append(borders_p)
+                else:
+                    tabela.style = 'Table Grid'
 
                 lote = dados_lista[i:i+2]
                 for dado in lote:
@@ -1203,6 +1215,10 @@ class AppPesquisaMercado:
                         add_f_line(p_corpo, "Localização:", loc_val)
                         p_corpo.add_run("\n")
                         add_f_line(p_corpo, "Data:", dado.get("data") or dado.get("Data", ""))
+
+                        # Remove explicitamente a divisória vertical no Modelo 1
+                        c_dados._tc.get_or_add_tcPr().append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:right w:val="nil"/></w:tcBorders>'))
+                        c_foto._tc.get_or_add_tcPr().append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="nil"/></w:tcBorders>'))
 
                     else:
                         add_f_line(p_dados, "Logradouro:", dado.get("endereco") or dado.get("Endereço", ""))
