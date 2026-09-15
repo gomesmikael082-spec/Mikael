@@ -4,6 +4,7 @@ import re
 import json
 import logging
 import threading
+import copy
 import requests
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -168,7 +169,7 @@ class AppPesquisaMercado:
         btn_sair = ttk.Button(frame_hub, text="🚪  Sair do Sistema", width=38, command=self.root.quit)
         btn_sair.pack(pady=(20, 0))
 
-    def _popup_escolha_modelo(self):
+    def _popup_escolha_modelo(self, callback_pos_confirmacao=None):
         janela = tk.Toplevel(self.root)
         janela.title("Selecionar Modelo de Ficha")
         janela.geometry("450x260")
@@ -194,16 +195,17 @@ class AppPesquisaMercado:
             janela.destroy()
             self.dados_pesquisas = []
             self._exibir_tela_trabalho()
+            if callback_pos_confirmacao:
+                callback_pos_confirmacao()
 
         ttk.Button(janela, text="Avançar", style="Primary.TButton", command=confirmar).pack(pady=(25, 0))
 
     def _abrir_projeto_hub(self):
-        if self._abrir_projeto():
+        if self._executar_abertura_json():
             self._exibir_tela_trabalho()
 
     def _importar_planilha_hub(self):
-        self._popup_escolha_modelo()
-        self.root.after(200, self._importar_planilha_excel)
+        self._popup_escolha_modelo(callback_pos_confirmacao=self._importar_planilha_excel)
 
     # --- TELA 2: ÁREA DE TRABALHO ---
     def _exibir_tela_trabalho(self):
@@ -219,7 +221,7 @@ class AppPesquisaMercado:
         menu_arquivo.add_command(label="🏠 Voltar ao Hub Inicial", command=self._exibir_tela_hub)
         menu_arquivo.add_separator()
         menu_arquivo.add_command(label="Novo Projeto...", command=self._popup_escolha_modelo)
-        menu_arquivo.add_command(label="Abrir Projeto (.json)...", command=self._abrir_projeto)
+        menu_arquivo.add_command(label="Abrir Projeto (.json)...", command=self._abrir_projeto_menu)
         menu_arquivo.add_command(label="Salvar Projeto (.json)", command=self._salvar_projeto)
         menu_arquivo.add_separator()
         menu_arquivo.add_command(label="📥 Importar Planilha Excel...", command=self._importar_planilha_excel)
@@ -234,8 +236,8 @@ class AppPesquisaMercado:
         self.root.config(menu=menubar)
 
     def _criar_layout_operacional(self):
-        mod_label = "Modelo 1: Padrão / Memória" if self.modelo_ativo == "PADRAO" else "Modelo 2: Contrato COPASA"
-        lbl_info_mod = ttk.Label(self.container_principal, text=f"Modo Atual: {mod_label}", font=("Segoe UI", 9, "italic"), foreground="#1f3c5b")
+        mod_label = "Modelo 1: Padrão / Memória de Cálculo" if self.modelo_ativo == "PADRAO" else "Modelo 2: Contrato COPASA"
+        lbl_info_mod = ttk.Label(self.container_principal, text=f"Modo Ativo: {mod_label}", font=("Segoe UI", 9, "italic"), foreground="#1f3c5b")
         lbl_info_mod.pack(anchor="w", padx=12, pady=(4, 0))
 
         frame_form = ttk.LabelFrame(self.container_principal, text=" Cadastro e Edição do Dado de Mercado ", padding=8)
@@ -270,7 +272,7 @@ class AppPesquisaMercado:
         frame_area.grid(row=3, column=1, sticky="w", padx=4, pady=2)
         self.txt_area = ttk.Entry(frame_area, width=13)
         self.txt_area.pack(side="left")
-        self.var_unidade = tk.StringVar(value="m²" if self.modelo_ativo == "PADRAO" else "m²")
+        self.var_unidade = tk.StringVar(value="ha" if self.modelo_ativo == "PADRAO" else "m²")
         self.cb_unidade = ttk.Combobox(frame_area, textvariable=self.var_unidade, values=["m²", "ha"], width=5, state="readonly")
         self.cb_unidade.pack(side="left", padx=2)
 
@@ -312,8 +314,8 @@ class AppPesquisaMercado:
         self.txt_foto2.grid(row=7, column=1, columnspan=2, sticky="w", padx=4, pady=2)
         ttk.Button(frame_form, text="Buscar", command=lambda: self._buscar_arquivo_foto(self.txt_foto2)).grid(row=7, column=3, sticky="w")
 
-        # Frame de Variáveis Dinâmicas
-        self.frame_vars = ttk.LabelFrame(self.container_principal, text=" Variáveis do Modelo de Ficha ", padding=8)
+        # Variáveis Dinâmicas
+        self.frame_vars = ttk.LabelFrame(self.container_principal, text=" Variáveis da Avaliação ", padding=8)
         self.frame_vars.pack(fill="x", padx=10, pady=3)
         self.widgets_dinamicos = {}
 
@@ -330,8 +332,8 @@ class AppPesquisaMercado:
 
         ttk.Button(frame_btn_cad, text="⚙ Configurar Variáveis", command=self._janela_config_variaveis).pack(side="right", padx=4)
 
-        # Tabela Visualização
-        frame_tabela = ttk.LabelFrame(self.container_principal, text=" Dados Cadastrados (Clique duplo em uma linha para editar) ", padding=8)
+        # Tabela
+        frame_tabela = ttk.LabelFrame(self.container_principal, text=" Dados Cadastrados (Clique duplo para editar) ", padding=8)
         frame_tabela.pack(fill="both", expand=True, padx=10, pady=3)
 
         colunas = ("dado", "informante", "endereco", "municipio", "valor", "area", "unidade", "unitario")
@@ -357,12 +359,12 @@ class AppPesquisaMercado:
         ttk.Button(frame_botoes_grid, text="🗑 Excluir Selecionado", command=self._excluir_dado).pack(side="left", padx=4)
         ttk.Button(frame_botoes_grid, text="📥 Importar Planilha (.xlsx)", command=self._importar_planilha_excel).pack(side="right", padx=4)
 
-        # Barra de Progresso para Downloads e Exportações
+        # Barra de Progresso
         self.progress_bar = ttk.Progressbar(self.container_principal, orient="horizontal", mode="determinate")
         self.progress_bar.pack(fill="x", padx=12, pady=2)
         self.progress_bar.pack_forget()
 
-        # Botões Inferiores de Exportação
+        # Botões de Ação
         frame_acoes = ttk.Frame(self.container_principal, padding=6)
         frame_acoes.pack(fill="x", padx=10, pady=4)
 
@@ -540,6 +542,8 @@ class AppPesquisaMercado:
             messagebox.showerror("Erro de Preenchimento", f"Verifique os dados numéricos: {e}")
 
     def _recarregar_grid(self):
+        if not hasattr(self, 'tree'):
+            return
         for item in self.tree.get_children():
             self.tree.delete(item)
 
@@ -666,7 +670,7 @@ class AppPesquisaMercado:
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao salvar arquivo: {e}")
 
-    def _abrir_projeto(self):
+    def _executar_abertura_json(self):
         caminho = filedialog.askopenfilename(filetypes=[("Projeto de Pesquisa (*.json)", "*.json")])
         if not caminho:
             return False
@@ -681,7 +685,11 @@ class AppPesquisaMercado:
             messagebox.showerror("Erro ao Abrir", f"Arquivo corrompido ou formato inválido: {e}")
             return False
 
-    # --- NOVO RECURSO: IMPORTADOR INTELIGENTE DE PLANILHAS EXCEL ---
+    def _abrir_projeto_menu(self):
+        if self._executar_abertura_json():
+            self._exibir_tela_trabalho()
+
+    # --- IMPORTADOR INTELIGENTE DE PLANILHAS EXCEL ---
     def _importar_planilha_excel(self):
         caminho = filedialog.askopenfilename(filetypes=[("Planilhas Excel", "*.xlsx;*.xls")])
         if not caminho:
@@ -689,20 +697,21 @@ class AppPesquisaMercado:
         try:
             xls = pd.ExcelFile(caminho)
             sheet_name = xls.sheet_names[0]
-            df = pd.read_excel(caminho, sheet_name=sheet_name)
 
-            # Localiza a linha de cabeçalho correta se houver títulos institucionais nas primeiras linhas
-            cabecalho_idx = 0
-            for r in range(min(5, len(df))):
-                linha_valores = [str(x).strip().lower() for x in df.iloc[r].dropna().values]
-                if any(x in linha_valores for x in ["informante", "endereço", "endereco", "valor total (r$)", "área terreno (m²)"]):
-                    cabecalho_idx = r + 1
+            # Escaneia as linhas brutas com header=None para achar o cabeçalho exato
+            df_scan = pd.read_excel(caminho, sheet_name=sheet_name, header=None)
+            header_row = 0
+            for idx, row in df_scan.head(10).iterrows():
+                vals = [str(v).strip().lower() for v in row.dropna().values]
+                if any(k in vals for k in ["informante", "endereço", "endereco", "valor total (r$)", "área terreno (m²)"]):
+                    header_row = idx
                     break
 
-            if cabecalho_idx > 0:
-                df = pd.read_excel(caminho, sheet_name=sheet_name, header=cabecalho_idx)
+            df = pd.read_excel(caminho, sheet_name=sheet_name, header=header_row)
 
             mapeamento = {}
+            unidade_detectada_coluna = None
+
             for col in df.columns:
                 c_clean = str(col).strip().lower()
                 if "informante" in c_clean: mapeamento["informante"] = col
@@ -711,13 +720,19 @@ class AppPesquisaMercado:
                 elif "bairro" in c_clean: mapeamento["bairro"] = col
                 elif "município" in c_clean or "municipio" in c_clean: mapeamento["municipio"] = col
                 elif "valor total" in c_clean or "oferta" in c_clean: mapeamento["valor_total"] = col
-                elif "área terreno" in c_clean or "area terreno" in c_clean: mapeamento["area_terreno"] = col
+                elif "área terreno" in c_clean or "area terreno" in c_clean:
+                    mapeamento["area_terreno"] = col
+                    if "(ha)" in c_clean:
+                        unidade_detectada_coluna = "ha"
+                    elif "(m²)" in c_clean or "(m2)" in c_clean:
+                        unidade_detectada_coluna = "m²"
                 elif "área construída" in c_clean or "area construida" in c_clean: mapeamento["area_construida"] = col
                 elif "coord. e" in c_clean or "coord e" in c_clean or "e (m)" in c_clean: mapeamento["coord_e"] = col
                 elif "coord. s" in c_clean or "coord s" in c_clean or "s (m)" in c_clean: mapeamento["coord_s"] = col
                 elif "zona" in c_clean: mapeamento["zona_utm"] = col
                 elif "data" in c_clean: mapeamento["data"] = col
                 elif "link" in c_clean: mapeamento["link"] = col
+                elif "unidade" in c_clean or "unid" in c_clean: mapeamento["unidade"] = col
 
             novos_dados = []
             for _, row in df.iterrows():
@@ -728,10 +743,18 @@ class AppPesquisaMercado:
                 a_terr = converter_para_float(row.get(mapeamento.get("area_terreno", ""), 0.0))
                 a_const = converter_para_float(row.get(mapeamento.get("area_construida", ""), 0.0))
 
-                unidade = "ha" if a_terr < 200 and self.modelo_ativo != "COPASA" else "m²"
-                u_calc = v_total / a_terr if a_terr > 0 else 0.0
+                # Resolução determinística de unidade
+                if "unidade" in mapeamento and not pd.isna(row.get(mapeamento["unidade"])):
+                    u_cand = str(row.get(mapeamento["unidade"])).strip().lower()
+                    unidade = "ha" if "ha" in u_cand else "m²"
+                elif unidade_detectada_coluna:
+                    unidade = unidade_detectada_coluna
+                else:
+                    unidade = self.var_unidade.get()
 
+                u_calc = v_total / a_terr if a_terr > 0 else 0.0
                 item_id = len(self.dados_pesquisas) + len(novos_dados) + 1
+
                 registro = {
                     "dado_id": item_id,
                     "informante": str(row.get(mapeamento.get("informante", ""), "")).replace("nan", "").strip(),
@@ -755,7 +778,6 @@ class AppPesquisaMercado:
                     "variaveis_extras": {}
                 }
 
-                # Tenta puxar colunas que batam com as variáveis ativas
                 for v_cfg in self.variaveis_config:
                     for col_planilha in df.columns:
                         if v_cfg["nome"].lower() in str(col_planilha).lower():
@@ -766,14 +788,14 @@ class AppPesquisaMercado:
             if novos_dados:
                 self.dados_pesquisas.extend(novos_dados)
                 self._recarregar_grid()
-                messagebox.showinfo("Importação Concluída", f"{len(novos_dados)} pesquisas importadas com sucesso da planilha!\nAgora basta selecionar as linhas para anexar as fotos.")
+                messagebox.showinfo("Importação Concluída", f"{len(novos_dados)} pesquisas importadas com sucesso!\nConfira as unidades e anexe as fotos correspondentes.")
             else:
-                messagebox.showwarning("Aviso", "Nenhum dado válido foi encontrado para importação na planilha selecionada.")
+                messagebox.showwarning("Aviso", "Nenhum dado válido encontrado para importação.")
 
         except Exception as e:
             messagebox.showerror("Erro na Importação", f"Falha ao ler a planilha: {e}")
 
-    # --- DOWNLOAD DE IMAGENS E EXPORTAÇÃO (ASSÍNCRONA) ---
+    # --- DOWNLOADS E EXPORTAÇÃO ---
     def _baixar_imagem(self, caminho_ou_url):
         if not caminho_ou_url:
             return None
@@ -786,7 +808,7 @@ class AppPesquisaMercado:
             elif os.path.exists(caminho_ou_url):
                 return caminho_ou_url
         except Exception as e:
-            logging.warning(f"Não foi possível carregar a imagem '{caminho_ou_url}': {e}")
+            logging.warning(f"Erro ao carregar imagem '{caminho_ou_url}': {e}")
             return None
         return None
 
@@ -856,11 +878,19 @@ class AppPesquisaMercado:
         self.progress_bar.pack(fill="x", padx=12, pady=4)
         self.progress_bar["value"] = 0
 
-        # Roda o processamento pesado em outra thread para a tela não congelar
-        thread = threading.Thread(target=self._processar_geracao_word, args=(caminho,), daemon=True)
+        # Snapshot imutável dos dados para evitar race condition durante edição concorrente
+        snapshot_dados = copy.deepcopy(self.dados_pesquisas)
+        snapshot_vars = copy.deepcopy(self.variaveis_config)
+        modelo_snap = self.modelo_ativo
+
+        thread = threading.Thread(
+            target=self._processar_geracao_word,
+            args=(caminho, snapshot_dados, snapshot_vars, modelo_snap),
+            daemon=True
+        )
         thread.start()
 
-    def _processar_geracao_word(self, caminho):
+    def _processar_geracao_word(self, caminho, dados_lista, variaveis_lista, modelo_selecionado):
         try:
             doc = Document()
             for section in doc.sections:
@@ -869,15 +899,13 @@ class AppPesquisaMercado:
                 section.left_margin = Inches(0.45)
                 section.right_margin = Inches(0.45)
 
-            total_dados = len(self.dados_pesquisas)
+            total_dados = len(dados_lista)
 
             for i in range(0, total_dados, 2):
                 if i > 0:
                     doc.add_page_break()
 
-                # Cabeçalhos específicos de cada modelo
-                if self.modelo_ativo == "PADRAO":
-                    # No Modelo 1: Título e barra azul aparecem EXCLUSIVAMENTE na Página 1[cite: 3]
+                if modelo_selecionado == "PADRAO":
                     if i == 0:
                         p_tit = doc.add_paragraph()
                         p_tit.paragraph_format.space_before = Pt(0)
@@ -901,8 +929,7 @@ class AppPesquisaMercado:
                         p_sp.paragraph_format.space_before = Pt(0)
                         p_sp.paragraph_format.space_after = Pt(4)
 
-                elif self.modelo_ativo == "COPASA":
-                    # Modelo 2 (COPASA): Cabeçalho com Logos e Faixa Azul em todas as páginas[cite: 3]
+                elif modelo_selecionado == "COPASA":
                     t_cab = doc.add_table(rows=1, cols=2)
                     t_cab.alignment = WD_TABLE_ALIGNMENT.CENTER
                     t_cab.autofit = False
@@ -928,7 +955,6 @@ class AppPesquisaMercado:
                     r_cop.font.size = Pt(13)
                     r_cop.font.color.rgb = RGBColor(50, 110, 180)
 
-                    # Faixa roxa/azul: CONTRATO: COPASA | PESQUISA DE MERCADO[cite: 3]
                     p_faixa = doc.add_paragraph()
                     p_faixa.paragraph_format.space_before = Pt(2)
                     p_faixa.paragraph_format.space_after = Pt(4)
@@ -952,7 +978,7 @@ class AppPesquisaMercado:
                 tabela.autofit = False
                 self._definir_bordas_tabela(tabela)
 
-                lote = self.dados_pesquisas[i:i+2]
+                lote = dados_lista[i:i+2]
                 for dado in lote:
                     un = dado.get("unidade", "m²")
                     row = tabela.add_row()
@@ -976,9 +1002,7 @@ class AppPesquisaMercado:
                         r2.font.name = "Arial"
                         r2.font.size = Pt(10)
 
-                    # ESTRUTURA DO MODELO 1: PADRÃO[cite: 3]
-                    if self.modelo_ativo == "PADRAO":
-                        # Título no topo centralizado[cite: 3]
+                    if modelo_selecionado == "PADRAO":
                         p_dados.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         r_top = p_dados.add_run(f"Pesquisa – {dado['dado_id']:02d}\n\n")
                         r_top.bold = True
@@ -1005,7 +1029,7 @@ class AppPesquisaMercado:
                         add_f_line(p_corpo, f"Valor Unitário/{un}:", f"R$ {formatar_moeda_br(dado.get('unitario', 0))}/{un}")
                         p_corpo.add_run("\n")
 
-                        for v_cfg in self.variaveis_config:
+                        for v_cfg in variaveis_lista:
                             v_nome = v_cfg["nome"]
                             v_val = dado.get("variaveis_extras", {}).get(v_nome, "")
                             add_f_line(p_corpo, f"{v_nome}:", v_val)
@@ -1020,7 +1044,6 @@ class AppPesquisaMercado:
                         p_corpo.add_run("\n")
                         add_f_line(p_corpo, "Data:", dado.get("data", ""))
 
-                    # ESTRUTURA DO MODELO 2: COPASA[cite: 3]
                     else:
                         add_f_line(p_dados, "Logradouro:", dado.get("endereco", ""))
                         add_f_line(p_dados, "Bairro:", dado.get("bairro", ""))
@@ -1045,7 +1068,6 @@ class AppPesquisaMercado:
                         p_dados.add_run("\n")
                         add_f_line(p_dados, "Data:", dado.get("data", ""))
 
-                        # Pesquisa centralizada embaixo no Modelo COPASA[cite: 3]
                         p_cop_num = celula_dados.add_paragraph()
                         p_cop_num.alignment = WD_ALIGN_PARAGRAPH.RIGHT
                         r_c_num = p_cop_num.add_run(f"Pesquisa {dado['dado_id']:02d}")
@@ -1053,7 +1075,7 @@ class AppPesquisaMercado:
                         r_c_num.font.name = "Arial"
                         r_c_num.font.size = Pt(9)
 
-                    # Inserção das Fotos
+                    # Fotos
                     img1 = self._baixar_imagem(dado.get("foto1"))
                     img2 = self._baixar_imagem(dado.get("foto2"))
 
