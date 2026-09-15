@@ -86,7 +86,7 @@ def normalizar_url_gdrive(url):
     return url
 
 def normalizar_dado(dado):
-    """Garante compatibilidade total entre arquivos JSON antigos e novos."""
+    """Compatibilidade retroativa com arquivos JSON anteriores."""
     d_id = dado.get("dado_id") if dado.get("dado_id") is not None else dado.get("D.", 1)
     informante = dado.get("informante") or dado.get("Informante") or ""
     telefone = dado.get("telefone") or dado.get("Telefone") or ""
@@ -939,7 +939,7 @@ class AppPesquisaMercado:
         messagebox.showinfo("Sucesso", "Planilha exportada com sucesso!")
 
     def _definir_bordas_tabela(self, table):
-        """Aplica moldura externa retangular e separador horizontal, SEM a listra vertical do meio."""
+        """Aplica moldura retangular externa sem divisória vertical entre colunas."""
         tblPr = table._tbl.tblPr
         borders = parse_xml(
             f'<w:tblBorders {nsdecls("w")}>'
@@ -952,6 +952,22 @@ class AppPesquisaMercado:
             f'</w:tblBorders>'
         )
         tblPr.append(borders)
+
+    def _configurar_borda_pagina_copasa(self, section):
+        """Aplica moldura externa retangular ao redor de toda a folha no Modelo COPASA."""
+        sectPr = section._sectPr
+        for child in list(sectPr):
+            if child.tag.endswith("pgBorders"):
+                sectPr.remove(child)
+        pgBrd = parse_xml(
+            f'<w:pgBorders {nsdecls("w")} w:offsetFrom="page">'
+            f'<w:top w:val="single" w:sz="6" w:space="16" w:color="000000"/>'
+            f'<w:left w:val="single" w:sz="6" w:space="16" w:color="000000"/>'
+            f'<w:bottom w:val="single" w:sz="6" w:space="16" w:color="000000"/>'
+            f'<w:right w:val="single" w:sz="6" w:space="16" w:color="000000"/>'
+            f'</w:pgBorders>'
+        )
+        sectPr.append(pgBrd)
 
     def _iniciar_exportacao_word_thread(self):
         if not self.dados_pesquisas:
@@ -979,21 +995,28 @@ class AppPesquisaMercado:
     def _processar_geracao_word(self, caminho, dados_lista, variaveis_lista, modelo_selecionado):
         try:
             doc = Document()
-            for section in doc.sections:
-                section.top_margin = Inches(0.35)
-                section.bottom_margin = Inches(0.35)
-                section.left_margin = Inches(0.45)
-                section.right_margin = Inches(0.45)
-
             total_dados = len(dados_lista)
+
+            for section in doc.sections:
+                if modelo_selecionado == "COPASA":
+                    # Proporções compactas e borda de página externa contornando a folha
+                    section.top_margin = Inches(0.55)
+                    section.bottom_margin = Inches(0.55)
+                    section.left_margin = Inches(0.70)
+                    section.right_margin = Inches(0.70)
+                    self._configurar_borda_pagina_copasa(section)
+                else:
+                    section.top_margin = Inches(0.35)
+                    section.bottom_margin = Inches(0.35)
+                    section.left_margin = Inches(0.55)
+                    section.right_margin = Inches(0.55)
 
             for i in range(0, total_dados, 2):
                 if i > 0:
                     doc.add_page_break()
 
-                # CABEÇALHOS DE PÁGINA
+                # --- CABEÇALHOS ---
                 if modelo_selecionado == "PADRAO":
-                    # Modelo 1: Título e barra azul apenas na Página 1
                     if i == 0:
                         p_tit = doc.add_paragraph()
                         p_tit.paragraph_format.space_before = Pt(0)
@@ -1018,13 +1041,12 @@ class AppPesquisaMercado:
                         p_sp.paragraph_format.space_after = Pt(4)
 
                 elif modelo_selecionado == "COPASA":
-                    # Modelo 2: Logos Enprol e Copasa alinhados
                     t_cab = doc.add_table(rows=1, cols=2)
                     t_cab.alignment = WD_TABLE_ALIGNMENT.CENTER
                     t_cab.autofit = False
                     c_logo1, c_logo2 = t_cab.cell(0, 0), t_cab.cell(0, 1)
-                    c_logo1.width = Inches(3.7)
-                    c_logo2.width = Inches(3.7)
+                    c_logo1.width = Inches(3.45)
+                    c_logo2.width = Inches(3.45)
 
                     p_enp = c_logo1.paragraphs[0]
                     p_enp.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -1062,13 +1084,12 @@ class AppPesquisaMercado:
                         r2.font.size = Pt(13)
                         r2.font.color.rgb = RGBColor(50, 110, 180)
 
-                    # Faixa roxa/azul: Tabela de 1 linha e 2 colunas com alinhamento perfeito
                     t_faixa = doc.add_table(rows=1, cols=2)
                     t_faixa.alignment = WD_TABLE_ALIGNMENT.CENTER
                     t_faixa.autofit = False
                     cf_esq, cf_dir = t_faixa.cell(0, 0), t_faixa.cell(0, 1)
-                    cf_esq.width = Inches(3.7)
-                    cf_dir.width = Inches(3.7)
+                    cf_esq.width = Inches(3.45)
+                    cf_dir.width = Inches(3.45)
 
                     shd_esq = parse_xml(f'<w:shd {nsdecls("w")} w:fill="8FA8D6"/>')
                     shd_dir = parse_xml(f'<w:shd {nsdecls("w")} w:fill="8FA8D6"/>')
@@ -1096,9 +1117,10 @@ class AppPesquisaMercado:
 
                     p_espaco = doc.add_paragraph()
                     p_espaco.paragraph_format.space_before = Pt(0)
-                    p_espaco.paragraph_format.space_after = Pt(2)
+                    p_espaco.paragraph_format.space_after = Pt(3)
 
-                # TABELA DE PESQUISAS (Moldura retangular sem divisória vertical)
+                # --- TABELA DE PESQUISAS ---
+                largura_coluna = Inches(3.45) if modelo_selecionado == "COPASA" else Inches(3.70)
                 tabela = doc.add_table(rows=0, cols=2)
                 tabela.alignment = WD_TABLE_ALIGNMENT.CENTER
                 tabela.autofit = False
@@ -1108,16 +1130,17 @@ class AppPesquisaMercado:
                 for dado in lote:
                     d_id = dado.get("dado_id") or dado.get("D.", 1)
                     un = dado.get("unidade") or dado.get("Unidade", "m²")
+
                     row = tabela.add_row()
                     celula_dados, celula_fotos = row.cells[0], row.cells[1]
-                    celula_dados.width = Inches(3.7)
-                    celula_fotos.width = Inches(3.7)
+                    celula_dados.width = largura_coluna
+                    celula_fotos.width = largura_coluna
                     celula_dados.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
                     celula_fotos.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
 
                     p_dados = celula_dados.paragraphs[0]
-                    p_dados.paragraph_format.line_spacing = 1.10
-                    p_dados.paragraph_format.space_before = Pt(0)
+                    p_dados.paragraph_format.line_spacing = 1.08
+                    p_dados.paragraph_format.space_before = Pt(2)
                     p_dados.paragraph_format.space_after = Pt(0)
 
                     def add_f_line(p, label, val):
@@ -1137,7 +1160,7 @@ class AppPesquisaMercado:
                         r_top.font.size = Pt(10)
 
                         p_corpo = celula_dados.add_paragraph()
-                        p_corpo.paragraph_format.line_spacing = 1.10
+                        p_corpo.paragraph_format.line_spacing = 1.08
                         p_corpo.paragraph_format.space_before = Pt(0)
                         p_corpo.paragraph_format.space_after = Pt(0)
 
@@ -1221,26 +1244,18 @@ class AppPesquisaMercado:
                         p_dados.add_run("\n")
                         add_f_line(p_dados, "Data:", dado.get("data") or dado.get("Data", ""))
 
-                        # Pesquisa centralizada na parte inferior do card
-                        p_cop_num = celula_dados.add_paragraph()
-                        p_cop_num.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        p_cop_num.paragraph_format.space_before = Pt(6)
-                        p_cop_num.paragraph_format.space_after = Pt(0)
-                        r_c_num = p_cop_num.add_run(f"Pesquisa {d_id:02d}")
-                        r_c_num.bold = True
-                        r_c_num.font.name = "Arial"
-                        r_c_num.font.size = Pt(10)
-
-                    # Inserção das Fotos
+                    # Fotos
                     img1 = self._baixar_imagem(dado.get("foto1") or dado.get("Foto1"))
                     img2 = self._baixar_imagem(dado.get("foto2") or dado.get("Foto2"))
 
                     p_foto = celula_fotos.paragraphs[0]
                     p_foto.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
+                    largura_foto = Inches(2.65) if modelo_selecionado == "COPASA" else Inches(2.75)
+
                     if img1 and img2:
                         try:
-                            p_foto.add_run().add_picture(img1, width=Inches(2.75))
+                            p_foto.add_run().add_picture(img1, width=largura_foto)
                         except Exception:
                             p_foto.add_run("[ Erro na Foto 1 ]\n")
 
@@ -1248,20 +1263,33 @@ class AppPesquisaMercado:
                         p_foto2.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         p_foto2.paragraph_format.space_before = Pt(2)
                         try:
-                            p_foto2.add_run().add_picture(img2, width=Inches(2.75))
+                            p_foto2.add_run().add_picture(img2, width=largura_foto)
                         except Exception:
                             p_foto2.add_run("[ Erro na Foto 2 ]")
 
                     elif img1 or img2:
                         img_unica = img1 if img1 else img2
                         try:
-                            p_foto.add_run().add_picture(img_unica, width=Inches(2.75))
+                            p_foto.add_run().add_picture(img_unica, width=largura_foto)
                         except Exception:
                             p_foto.add_run("[ Erro ao carregar imagem ]")
                     else:
                         r_vazio = p_foto.add_run("[ Sem fotos anexadas ]")
                         r_vazio.font.name = "Arial"
                         r_vazio.font.size = Pt(10)
+
+                    # No MODELO COPASA: "Pesquisa 01" mesclada no centro total do card
+                    if modelo_selecionado == "COPASA":
+                        row_lbl = tabela.add_row()
+                        cel_mesclada = row_lbl.cells[0].merge(row_lbl.cells[1])
+                        p_cop_num = cel_mesclada.paragraphs[0]
+                        p_cop_num.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        p_cop_num.paragraph_format.space_before = Pt(4)
+                        p_cop_num.paragraph_format.space_after = Pt(3)
+                        r_c_num = p_cop_num.add_run(f"Pesquisa {d_id:02d}")
+                        r_c_num.bold = True
+                        r_c_num.font.name = "Arial"
+                        r_c_num.font.size = Pt(9.5)
 
                     progresso = int(((i + 1) / total_dados) * 100)
                     self.root.after(0, lambda p=progresso: self._atualizar_progresso(p))
