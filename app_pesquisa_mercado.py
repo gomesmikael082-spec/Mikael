@@ -564,7 +564,7 @@ class AppPesquisaMercado:
             unidade = self.var_unidade.get()
             unitario = valor_total / area_num if area_num > 0 else 0.0
 
-            dado_num = self.item_em_edicao["dado_id"] if self.item_em_edicao else (len(self.dados_pesquisas) + 1)
+            dado_num = self.item_em_edicao.get("dado_id", self.item_em_edicao.get("D.", 1)) if self.item_em_edicao else (len(self.dados_pesquisas) + 1)
 
             coord_e = limpar_sufixo_coord(self.txt_coord_e.get())
             coord_s = limpar_sufixo_coord(self.txt_coord_s.get())
@@ -597,7 +597,7 @@ class AppPesquisaMercado:
                 registro["variaveis_extras"][nome] = val
 
             if self.item_em_edicao:
-                idx = next((i for i, d in enumerate(self.dados_pesquisas) if d["dado_id"] == dado_num), None)
+                idx = next((i for i, d in enumerate(self.dados_pesquisas) if (d.get("dado_id") or d.get("D.")) == dado_num), None)
                 if idx is not None:
                     self.dados_pesquisas[idx] = registro
                     messagebox.showinfo("Atualizado", f"Pesquisa {dado_num:02d} atualizada com sucesso!")
@@ -616,17 +616,22 @@ class AppPesquisaMercado:
             self.tree.delete(item)
 
         for dado in self.dados_pesquisas:
-            un = dado.get("unidade", "m²")
+            d_id = dado.get("dado_id") or dado.get("D.", 1)
+            un = dado.get("unidade") or dado.get("Unidade", "m²")
             casas = 4 if un == "ha" else 2
-            v_total = dado.get("valor_total", 0.0)
-            a_total = dado.get("area_terreno", 0.0)
-            u_unit = dado.get("unitario", 0.0)
+            v_total = dado.get("valor_total") if dado.get("valor_total") is not None else dado.get("Valor Total (R$)", 0.0)
+            a_total = dado.get("area_terreno") if dado.get("area_terreno") is not None else (dado.get(f"Área Terreno ({un})") or dado.get("Área Terreno (ha)") or dado.get("Área Terreno (m²)", 0.0))
+            u_unit = dado.get("unitario") if dado.get("unitario") is not None else (dado.get(f"Unitário (R$/{un})") or 0.0)
 
             self.tree.insert("", "end", values=(
-                dado["dado_id"], dado.get("informante", ""), dado.get("endereco", ""),
-                dado.get("municipio", ""), f"R$ {formatar_moeda_br(v_total)}",
+                d_id,
+                dado.get("informante") or dado.get("Informante", ""),
+                dado.get("endereco") or dado.get("Endereço", ""),
+                dado.get("municipio") or dado.get("Município", ""),
+                f"R$ {formatar_moeda_br(v_total)}",
                 f"{formatar_numero_br(a_total, casas)}",
-                un, f"R$ {formatar_moeda_br(u_unit)}"
+                un,
+                f"R$ {formatar_moeda_br(u_unit)}"
             ))
 
     def _carregar_para_edicao(self):
@@ -637,7 +642,7 @@ class AppPesquisaMercado:
 
         item_val = self.tree.item(sel[0])["values"]
         dado_id = item_val[0]
-        dado = next((d for d in self.dados_pesquisas if d["dado_id"] == dado_id), None)
+        dado = next((d for d in self.dados_pesquisas if (d.get("dado_id") or d.get("D.")) == dado_id), None)
         if not dado:
             return
 
@@ -646,61 +651,61 @@ class AppPesquisaMercado:
         self.btn_cancelar_edicao.config(state="normal")
 
         self.txt_informante.delete(0, tk.END)
-        self.txt_informante.insert(0, dado.get("informante", ""))
+        self.txt_informante.insert(0, dado.get("informante") or dado.get("Informante", ""))
 
         self.txt_telefone.delete(0, tk.END)
-        self.txt_telefone.insert(0, dado.get("telefone", ""))
+        self.txt_telefone.insert(0, dado.get("telefone") or dado.get("Telefone", ""))
 
         self.txt_endereco.delete(0, tk.END)
-        self.txt_endereco.insert(0, dado.get("endereco", ""))
+        self.txt_endereco.insert(0, dado.get("endereco") or dado.get("Endereço", ""))
 
         self.txt_bairro.delete(0, tk.END)
-        self.txt_bairro.insert(0, dado.get("bairro", ""))
+        self.txt_bairro.insert(0, dado.get("bairro") or dado.get("Bairro", ""))
 
         self.txt_municipio.delete(0, tk.END)
-        self.txt_municipio.insert(0, dado.get("municipio", ""))
+        self.txt_municipio.insert(0, dado.get("municipio") or dado.get("Município", ""))
 
-        v_total = dado.get("valor_total", 0.0)
+        v_total = dado.get("valor_total") if dado.get("valor_total") is not None else dado.get("Valor Total (R$)", 0.0)
         self.txt_valor.delete(0, tk.END)
         self.txt_valor.insert(0, formatar_moeda_br(v_total))
 
-        un = dado.get("unidade", "m²")
+        un = dado.get("unidade") or dado.get("Unidade", "m²")
         self.var_unidade.set(un)
 
-        a_total = dado.get("area_terreno", 0.0)
+        a_total = dado.get("area_terreno") if dado.get("area_terreno") is not None else (dado.get(f"Área Terreno ({un})") or dado.get("Área Terreno (ha)") or dado.get("Área Terreno (m²)", 0.0))
         casas = 4 if un == "ha" else 2
         self.txt_area.delete(0, tk.END)
         self.txt_area.insert(0, formatar_numero_br(a_total, casas))
 
-        a_const = dado.get("area_construida", 0.0)
+        a_const = dado.get("area_construida") if dado.get("area_construida") is not None else dado.get("Área Construída (m²)", 0.0)
         self.txt_area_const.delete(0, tk.END)
         if a_const > 0:
             self.txt_area_const.insert(0, formatar_numero_br(a_const, 2))
 
         self.txt_zona.delete(0, tk.END)
-        self.txt_zona.insert(0, dado.get("zona_utm", ""))
+        self.txt_zona.insert(0, dado.get("zona_utm") or dado.get("Zona UTM", ""))
 
         self.txt_coord_e.delete(0, tk.END)
-        self.txt_coord_e.insert(0, dado.get("coord_e", ""))
+        self.txt_coord_e.insert(0, dado.get("coord_e") or dado.get("Coord. E (m)", ""))
 
         self.txt_coord_s.delete(0, tk.END)
-        self.txt_coord_s.insert(0, dado.get("coord_s", ""))
+        self.txt_coord_s.insert(0, dado.get("coord_s") or dado.get("Coord. S (m)", ""))
 
         self.txt_data.delete(0, tk.END)
-        self.txt_data.insert(0, dado.get("data", ""))
+        self.txt_data.insert(0, dado.get("data") or dado.get("Data", ""))
 
         self.txt_link.delete(0, tk.END)
-        self.txt_link.insert(0, dado.get("link", ""))
+        self.txt_link.insert(0, dado.get("link") or dado.get("Link", ""))
 
         self.txt_foto1.delete(0, tk.END)
-        self.txt_foto1.insert(0, dado.get("foto1", ""))
+        self.txt_foto1.insert(0, dado.get("foto1") or dado.get("Foto1", ""))
 
         self.txt_foto2.delete(0, tk.END)
-        self.txt_foto2.insert(0, dado.get("foto2", ""))
+        self.txt_foto2.insert(0, dado.get("foto2") or dado.get("Foto2", ""))
 
-        extras = dado.get("variaveis_extras", {})
+        extras = dado.get("variaveis_extras") or dado.get("VariaveisExtras", {})
         for nome, widget in self.widgets_dinamicos.items():
-            val = extras.get(nome, "")
+            val = extras.get(nome, dado.get(nome, ""))
             if isinstance(widget, ttk.Combobox):
                 widget.set(val)
             else:
@@ -716,7 +721,7 @@ class AppPesquisaMercado:
         item_val = self.tree.item(sel[0])["values"]
         dado_id = item_val[0]
         if messagebox.askyesno("Confirmar Exclusão", f"Deseja excluir a Pesquisa {dado_id}?"):
-            self.dados_pesquisas = [d for d in self.dados_pesquisas if d["dado_id"] != dado_id]
+            self.dados_pesquisas = [d for d in self.dados_pesquisas if (d.get("dado_id") or d.get("D.")) != dado_id]
             for i, d in enumerate(self.dados_pesquisas):
                 d["dado_id"] = i + 1
             self._recarregar_grid()
@@ -751,7 +756,6 @@ class AppPesquisaMercado:
             raw_pesquisas = conteudo.get("pesquisas", [])
             self.dados_pesquisas = [normalizar_dado(d) for d in raw_pesquisas]
 
-            # Se já estiver na tela de trabalho, atualiza imediatamente
             if hasattr(self, 'tree'):
                 self._atualizar_interface_variaveis()
                 self._recarregar_grid()
@@ -898,26 +902,33 @@ class AppPesquisaMercado:
 
         linhas_export = []
         for d in self.dados_pesquisas:
-            un = d.get("unidade", "m²")
+            d_id = d.get("dado_id") or d.get("D.", 1)
+            un = d.get("unidade") or d.get("Unidade", "m²")
+            v_total = d.get("valor_total") if d.get("valor_total") is not None else d.get("Valor Total (R$)", 0.0)
+            a_total = d.get("area_terreno") if d.get("area_terreno") is not None else (d.get(f"Área Terreno ({un})") or 0.0)
+            a_const = d.get("area_construida") if d.get("area_construida") is not None else d.get("Área Construída (m²)", 0.0)
+            u_unit = d.get("unitario") if d.get("unitario") is not None else (d.get(f"Unitário (R$/{un})") or 0.0)
+
             linha = {
-                "D.": d["dado_id"],
-                "Informante": d.get("informante", ""),
-                "Telefone": d.get("telefone", ""),
-                "Endereço": d.get("endereco", ""),
-                "Bairro": d.get("bairro", ""),
-                "Município": d.get("municipio", ""),
-                "Valor Total (R$)": d.get("valor_total", 0.0),
-                f"Área Terreno ({un})": d.get("area_terreno", 0.0),
-                "Área Construída (m²)": d.get("area_construida", 0.0),
-                f"Unitário (R$/{un})": d.get("unitario", 0.0),
-                "Zona UTM": d.get("zona_utm", ""),
-                "Coord. E (m)": d.get("coord_e", ""),
-                "Coord. S (m)": d.get("coord_s", ""),
-                "Localização": d.get("localizacao", "Urbana"),
-                "Data": d.get("data", ""),
-                "Link": d.get("link", "")
+                "D.": d_id,
+                "Informante": d.get("informante") or d.get("Informante", ""),
+                "Telefone": d.get("telefone") or d.get("Telefone", ""),
+                "Endereço": d.get("endereco") or d.get("Endereço", ""),
+                "Bairro": d.get("bairro") or d.get("Bairro", ""),
+                "Município": d.get("municipio") or d.get("Município", ""),
+                "Valor Total (R$)": v_total,
+                f"Área Terreno ({un})": a_total,
+                "Área Construída (m²)": a_const,
+                f"Unitário (R$/{un})": u_unit,
+                "Zona UTM": d.get("zona_utm") or d.get("Zona UTM", ""),
+                "Coord. E (m)": d.get("coord_e") or d.get("Coord. E (m)", ""),
+                "Coord. S (m)": d.get("coord_s") or d.get("Coord. S (m)", ""),
+                "Localização": d.get("localizacao") or d.get("Localização", "Urbana"),
+                "Data": d.get("data") or d.get("Data", ""),
+                "Link": d.get("link") or d.get("Link", "")
             }
-            for k, v in d.get("variaveis_extras", {}).items():
+            extras = d.get("variaveis_extras") or d.get("VariaveisExtras", {})
+            for k, v in extras.items():
                 linha[k] = v
             linhas_export.append(linha)
 
@@ -1095,7 +1106,8 @@ class AppPesquisaMercado:
 
                 lote = dados_lista[i:i+2]
                 for dado in lote:
-                    un = dado.get("unidade", "m²")
+                    d_id = dado.get("dado_id") or dado.get("D.", 1)
+                    un = dado.get("unidade") or dado.get("Unidade", "m²")
                     row = tabela.add_row()
                     celula_dados, celula_fotos = row.cells[0], row.cells[1]
                     celula_dados.width = Inches(3.7)
@@ -1119,7 +1131,7 @@ class AppPesquisaMercado:
 
                     if modelo_selecionado == "PADRAO":
                         p_dados.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        r_top = p_dados.add_run(f"Pesquisa – {dado['dado_id']:02d}\n\n")
+                        r_top = p_dados.add_run(f"Pesquisa – {d_id:02d}\n\n")
                         r_top.bold = True
                         r_top.font.name = "Arial"
                         r_top.font.size = Pt(10)
@@ -1129,74 +1141,99 @@ class AppPesquisaMercado:
                         p_corpo.paragraph_format.space_before = Pt(0)
                         p_corpo.paragraph_format.space_after = Pt(0)
 
-                        add_f_line(p_corpo, "Logradouro:", dado.get("endereco", ""))
-                        if dado.get("bairro"):
-                            add_f_line(p_corpo, "Bairro:", dado.get("bairro", ""))
-                        add_f_line(p_corpo, "Município:", dado.get("municipio", ""))
-                        add_f_line(p_corpo, "Contato:", f"{dado.get('telefone', '')} - {dado.get('informante', '')}")
-                        add_f_line(p_corpo, "Link:", dado.get("link", ""))
+                        add_f_line(p_corpo, "Logradouro:", dado.get("endereco") or dado.get("Endereço", ""))
+                        bairro_val = dado.get("bairro") or dado.get("Bairro", "")
+                        if bairro_val:
+                            add_f_line(p_corpo, "Bairro:", bairro_val)
+                        add_f_line(p_corpo, "Município:", dado.get("municipio") or dado.get("Município", ""))
+                        tel_val = dado.get("telefone") or dado.get("Telefone", "")
+                        inf_val = dado.get("informante") or dado.get("Informante", "")
+                        add_f_line(p_corpo, "Contato:", f"{tel_val} - {inf_val}")
+                        add_f_line(p_corpo, "Link:", dado.get("link") or dado.get("Link", ""))
                         p_corpo.add_run("\n")
 
+                        a_terr = dado.get("area_terreno") if dado.get("area_terreno") is not None else (dado.get(f"Área Terreno ({un})") or 0.0)
                         casas = 4 if un == "ha" else 2
-                        add_f_line(p_corpo, "Área Terreno:", f"{formatar_numero_br(dado.get('area_terreno', 0), casas)} {un}")
-                        add_f_line(p_corpo, "Área Construída:", f"{formatar_numero_br(dado.get('area_construida', 0), 2)} m²")
-                        add_f_line(p_corpo, "Valor da Oferta:", f"R$ {formatar_moeda_br(dado.get('valor_total', 0))}")
-                        add_f_line(p_corpo, f"Valor Unitário/{un}:", f"R$ {formatar_moeda_br(dado.get('unitario', 0))}/{un}")
+                        add_f_line(p_corpo, "Área Terreno:", f"{formatar_numero_br(a_terr, casas)} {un}")
+
+                        a_const = dado.get("area_construida") if dado.get("area_construida") is not None else dado.get("Área Construída (m²)", 0.0)
+                        add_f_line(p_corpo, "Área Construída:", f"{formatar_numero_br(a_const, 2)} m²")
+
+                        v_tot = dado.get("valor_total") if dado.get("valor_total") is not None else dado.get("Valor Total (R$)", 0.0)
+                        add_f_line(p_corpo, "Valor da Oferta:", f"R$ {formatar_moeda_br(v_tot)}")
+
+                        u_val = dado.get("unitario") if dado.get("unitario") is not None else (dado.get(f"Unitário (R$/{un})") or 0.0)
+                        add_f_line(p_corpo, f"Valor Unitário/{un}:", f"R$ {formatar_moeda_br(u_val)}/{un}")
                         p_corpo.add_run("\n")
 
+                        extras = dado.get("variaveis_extras") or dado.get("VariaveisExtras", {})
                         for v_cfg in variaveis_lista:
                             v_nome = v_cfg["nome"]
-                            v_val = dado.get("variaveis_extras", {}).get(v_nome, "")
+                            v_val = extras.get(v_nome, dado.get(v_nome, ""))
                             add_f_line(p_corpo, f"{v_nome}:", v_val)
 
-                        zona_str = f"{dado.get('zona_utm', '').strip()} " if dado.get('zona_utm') else ""
-                        coord_e = limpar_sufixo_coord(dado.get('coord_e', ''))
-                        coord_s = limpar_sufixo_coord(dado.get('coord_s', ''))
+                        zona_val = dado.get("zona_utm") or dado.get("Zona UTM", "")
+                        zona_str = f"{str(zona_val).strip()} " if zona_val else ""
+                        coord_e = limpar_sufixo_coord(dado.get("coord_e") or dado.get("Coord. E (m)", ""))
+                        coord_s = limpar_sufixo_coord(dado.get("coord_s") or dado.get("Coord. S (m)", ""))
                         coord_texto = f"{zona_str}{coord_e} m E / {coord_s} m S" if coord_e or coord_s else ""
 
                         add_f_line(p_corpo, "Coordenadas Geográfica:", coord_texto)
-                        add_f_line(p_corpo, "Localização:", dado.get("localizacao", "Urbana"))
+                        loc_val = dado.get("localizacao") or dado.get("Localização", "Urbana")
+                        add_f_line(p_corpo, "Localização:", loc_val)
                         p_corpo.add_run("\n")
-                        add_f_line(p_corpo, "Data:", dado.get("data", ""))
+                        add_f_line(p_corpo, "Data:", dado.get("data") or dado.get("Data", ""))
 
                     else:
                         # MODELO 2: COPASA
-                        add_f_line(p_dados, "Logradouro:", dado.get("endereco", ""))
-                        add_f_line(p_dados, "Bairro:", dado.get("bairro", ""))
-                        add_f_line(p_dados, "Município:", dado.get("municipio", ""))
+                        add_f_line(p_dados, "Logradouro:", dado.get("endereco") or dado.get("Endereço", ""))
+                        add_f_line(p_dados, "Bairro:", dado.get("bairro") or dado.get("Bairro", ""))
+                        add_f_line(p_dados, "Município:", dado.get("municipio") or dado.get("Município", ""))
                         p_dados.add_run("\n")
-                        add_f_line(p_dados, "Informações:", dado.get("variaveis_extras", {}).get("Informações", ""))
-                        p_dados.add_run("\n")
-                        add_f_line(p_dados, "Área Terreno:", f"{formatar_numero_br(dado.get('area_terreno', 0), 2)} m²")
-                        add_f_line(p_dados, "Área Construída:", f"{formatar_numero_br(dado.get('area_construida', 0), 2)} m²")
-                        add_f_line(p_dados, "Frente:", dado.get("variaveis_extras", {}).get("Frente", "Não informado"))
-                        p_dados.add_run("\n")
-                        add_f_line(p_dados, "Via de acesso:", dado.get("variaveis_extras", {}).get("Via de acesso", ""))
 
-                        zona_str = f"{dado.get('zona_utm', '').strip()} " if dado.get('zona_utm') else ""
-                        coord_e = limpar_sufixo_coord(dado.get('coord_e', ''))
-                        coord_s = limpar_sufixo_coord(dado.get('coord_s', ''))
+                        extras = dado.get("variaveis_extras") or dado.get("VariaveisExtras", {})
+                        add_f_line(p_dados, "Informações:", extras.get("Informações", dado.get("Informações", "")))
+                        p_dados.add_run("\n")
+
+                        a_terr = dado.get("area_terreno") if dado.get("area_terreno") is not None else (dado.get("Área Terreno (m²)") or 0.0)
+                        add_f_line(p_dados, "Área Terreno:", f"{formatar_numero_br(a_terr, 2)} m²")
+
+                        a_const = dado.get("area_construida") if dado.get("area_construida") is not None else dado.get("Área Construída (m²)", 0.0)
+                        add_f_line(p_dados, "Área Construída:", f"{formatar_numero_br(a_const, 2)} m²")
+
+                        add_f_line(p_dados, "Frente:", extras.get("Frente", dado.get("Frente", "Não informado")))
+                        p_dados.add_run("\n")
+                        add_f_line(p_dados, "Via de acesso:", extras.get("Via de acesso", dado.get("Via de acesso", "")))
+
+                        zona_val = dado.get("zona_utm") or dado.get("Zona UTM", "")
+                        zona_str = f"{str(zona_val).strip()} " if zona_val else ""
+                        coord_e = limpar_sufixo_coord(dado.get("coord_e") or dado.get("Coord. E (m)", ""))
+                        coord_s = limpar_sufixo_coord(dado.get("coord_s") or dado.get("Coord. S (m)", ""))
                         coord_texto = f"{zona_str}{coord_e} m E / {coord_s} m S" if coord_e or coord_s else ""
                         add_f_line(p_dados, "Coordenadas UTM:", coord_texto)
                         p_dados.add_run("\n")
-                        add_f_line(p_dados, "Valor Unitário:", f"R$ {formatar_moeda_br(dado.get('unitario', 0))}/m²")
-                        add_f_line(p_dados, "Valor Total:", f"R$ {formatar_moeda_br(dado.get('valor_total', 0))}")
+
+                        u_val = dado.get("unitario") if dado.get("unitario") is not None else (dado.get("Unitário (R$/m²)") or 0.0)
+                        add_f_line(p_dados, "Valor Unitário:", f"R$ {formatar_moeda_br(u_val)}/m²")
+
+                        v_tot = dado.get("valor_total") if dado.get("valor_total") is not None else dado.get("Valor Total (R$)", 0.0)
+                        add_f_line(p_dados, "Valor Total:", f"R$ {formatar_moeda_br(v_tot)}")
                         p_dados.add_run("\n")
-                        add_f_line(p_dados, "Data:", dado.get("data", ""))
+                        add_f_line(p_dados, "Data:", dado.get("data") or dado.get("Data", ""))
 
                         # Pesquisa centralizada na parte inferior do card
                         p_cop_num = celula_dados.add_paragraph()
                         p_cop_num.alignment = WD_ALIGN_PARAGRAPH.CENTER
                         p_cop_num.paragraph_format.space_before = Pt(6)
                         p_cop_num.paragraph_format.space_after = Pt(0)
-                        r_c_num = p_cop_num.add_run(f"Pesquisa {dado['dado_id']:02d}")
+                        r_c_num = p_cop_num.add_run(f"Pesquisa {d_id:02d}")
                         r_c_num.bold = True
                         r_c_num.font.name = "Arial"
                         r_c_num.font.size = Pt(10)
 
                     # Inserção das Fotos
-                    img1 = self._baixar_imagem(dado.get("foto1"))
-                    img2 = self._baixar_imagem(dado.get("foto2"))
+                    img1 = self._baixar_imagem(dado.get("foto1") or dado.get("Foto1"))
+                    img2 = self._baixar_imagem(dado.get("foto2") or dado.get("Foto2"))
 
                     p_foto = celula_fotos.paragraphs[0]
                     p_foto.alignment = WD_ALIGN_PARAGRAPH.CENTER
