@@ -3,26 +3,47 @@ import io
 import re
 import json
 import math
+import queue
 import logging
 import threading
 import copy
 import statistics
+from datetime import datetime
 import requests
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import pandas as pd
+from PIL import Image
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
 from docx.oxml import parse_xml
-from docx.oxml.ns import nsdecls
+from docx.oxml.ns import nsdecls, qn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".pesquisa_mercado")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config_variaveis.json")
+
+# --- ORDEM DO SCHEMA OPENXML (WORD) ---
+SUC_TCPR  = ["w:shd", "w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText", "w:vAlign", "w:hideMark"]
+SUC_TBLPR = ["w:shd", "w:tblLayout", "w:tblCellMar", "w:tblLook"]
+SUC_CMAR  = ["w:tblLook"]
+SUC_PPR   = ["w:shd", "w:tabs", "w:suppressAutoHyphens", "w:spacing", "w:ind", "w:jc", "w:rPr"]
+
+
+def inserir_ordenado(pai, el, sucessores):
+    """Insere elemento XML respeitando a sequência estrita de tags do schema WordprocessingML."""
+    for tag in sucessores:
+        achado = pai.find(qn(tag))
+        if achado is not None:
+            achado.addprevious(el)
+            return
+    pai.append(el)
+
 
 # --- TABELA 02: NOTA AGRONÔMICA (Adaptado de Kozma 1984 x IN RFB 1877/2019) ---
 TABELA_NOTA_AGRONOMICA = {
@@ -95,6 +116,17 @@ CATALOGO_VARIAVEIS_USUAIS = [
 ]
 
 
+def data_hoje_br():
+    return datetime.now().strftime("%d/%m/%Y")
+
+
+def normalizar_chave_var(nome):
+    """Normaliza nome de coluna/variável para comparação exata."""
+    s = str(nome).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
 def calcular_nota_agronomica(aptidao_str, situacao_str):
     """Cruza automaticamente a Aptidão (I a VI) e a Situação/Acesso conforme a Tabela 02."""
     if not aptidao_str or not situacao_str:
@@ -115,7 +147,10 @@ def calcular_nota_agronomica(aptidao_str, situacao_str):
 
 
 def converter_latlon_para_utm(texto_coord):
-    """Extrai Latitude e Longitude de texto ou link do Google Maps e converte para Zona UTM, Coord E e Coord S."""
+    """
+    Extrai Latitude e Longitude (graus decimais, referência SIRGAS 2000 / WGS84)
+    e converte para Zona UTM, Coord. E (m) e Coord. S (m).
+    """
     if not texto_coord:
         return None
     nums = re.findall(r"[-+]?\d+\.\d+", str(texto_coord))
@@ -125,8 +160,9 @@ def converter_latlon_para_utm(texto_coord):
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return None
 
+    # Elipsoide GRS80 (SIRGAS 2000) / WGS84
     a = 6378137.0
-    f = 1 / 298.257223563
+    f = 1 / 298.257222101
     k0 = 0.9996
     e2 = 2 * f - f * f
     ep2 = e2 / (1 - e2)
@@ -162,7 +198,7 @@ def converter_latlon_para_utm(texto_coord):
     if lat < 0:
         northing += 10000000.0
 
-    bandas = "CDEFGHJKLMNPQRSTUVWXX"
+    bandas = "CDEFGHJKLMNPQRSTUVWX"
     idx_banda = int((lat + 80) / 8)
     letra_zona = bandas[max(0, min(len(bandas) - 1, idx_banda))] if -80 <= lat <= 84 else ("S" if lat < 0 else "N")
 
@@ -170,10 +206,14 @@ def converter_latlon_para_utm(texto_coord):
 
 
 def converter_para_float(texto):
+    """Converte strings ou números para float sem corromper decimais já numéricos."""
     if texto is None:
         return 0.0
+    if isinstance(texto, (int, float)):
+        val_f = float(texto)
+        return 0.0 if math.isnan(val_f) else val_f
     s = str(texto).replace("R$", "").replace("m²", "").replace("ha", "").strip()
-    if not s:
+    if not s or s.lower() == "nan":
         return 0.0
     if "." in s and "," in s:
         s = s.replace(".", "").replace(",", ".")
@@ -266,7 +306,7 @@ def normalizar_dado(dado):
     zona_utm = dado.get("zona_utm") or dado.get("Zona UTM") or ""
     coord_e = dado.get("coord_e") or dado.get("Coord. E (m)") or ""
     coord_s = dado.get("coord_s") or dado.get("Coord. S (m)") or ""
-    data = dado.get("data") or dado.get("Data") or "18/08/2026"
+    data = dado.get("data") or dado.get("Data") or data_hoje_br()
     link = dado.get("link") or dado.get("Link") or ""
     foto1 = dado.get("foto1") or dado.get("Foto1") or ""
     foto2 = dado.get("foto2") or dado.get("Foto2") or ""
@@ -302,7 +342,7 @@ def normalizar_dado(dado):
 class AppPesquisaMercado:
     def __init__(self, root):
         self.root = root
-        self.root.title("ENPROL - Sistema de Pesquisa de Mercado v6.0 (Padrão SISDEA Pro)")
+        self.root.title("ENPROL - Sistema de Pesquisa de Mercado v6.1 (Padrão SISDEA Pro)")
         self.root.geometry("1220x860")
         self.root.minsize(1050, 740)
 
@@ -313,11 +353,29 @@ class AppPesquisaMercado:
         self.item_em_edicao = None
         self.variaveis_config = self._carregar_config_variaveis()
         self.celula_ativa = {"dado_id": None, "campo": None, "rotulo": ""}
+        self.fila_eventos_ui = queue.Queue()
 
         self.container_principal = ttk.Frame(self.root)
         self.container_principal.pack(fill="both", expand=True)
 
+        self.root.after(100, self._processar_fila_ui)
         self._exibir_tela_hub()
+
+    def _processar_fila_ui(self):
+        """Processa eventos enviados por threads secundárias de forma thread-safe na main thread."""
+        try:
+            while True:
+                acao, payload = self.fila_eventos_ui.get_nowait()
+                if acao == "progresso":
+                    self._atualizar_progresso(payload)
+                elif acao == "concluido":
+                    self._concluir_exportacao()
+                elif acao == "erro":
+                    self._falha_exportacao(payload)
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self._processar_fila_ui)
 
     def _configurar_estilos(self):
         style = ttk.Style()
@@ -343,6 +401,9 @@ class AppPesquisaMercado:
     def _limpar_container(self):
         for widget in self.container_principal.winfo_children():
             widget.destroy()
+        for attr in ("tree", "frame_vars", "lbl_estatisticas", "progress_bar"):
+            if hasattr(self, attr):
+                delattr(self, attr)
 
     def _carregar_config_variaveis(self):
         if os.path.exists(CONFIG_FILE):
@@ -368,7 +429,7 @@ class AppPesquisaMercado:
         frame_hub = ttk.Frame(self.container_principal, padding=40)
         frame_hub.place(relx=0.5, rely=0.5, anchor="center")
 
-        lbl_logo = ttk.Label(frame_hub, text="SISTEMA DE PESQUISA DE MERCADO v6.0", font=("Segoe UI", 18, "bold"), foreground="#1f3c5b")
+        lbl_logo = ttk.Label(frame_hub, text="SISTEMA DE PESQUISA DE MERCADO v6.1", font=("Segoe UI", 18, "bold"), foreground="#1f3c5b")
         lbl_logo.pack(pady=(0, 5))
 
         lbl_sub = ttk.Label(frame_hub, text="Integração Direta SISDEA • Automação Agronômica • Relatórios Word", font=("Segoe UI", 10), foreground="#555555")
@@ -535,7 +596,6 @@ class AppPesquisaMercado:
         self.txt_area_const = ttk.Entry(frame_form, width=20)
         self.txt_area_const.grid(row=2, column=3, padx=4, pady=2, sticky="w")
 
-        # Checkbox de Utilizado no Modelo
         self.var_utilizado = tk.BooleanVar(value=True)
         self.chk_utilizado = ttk.Checkbutton(
             frame_form,
@@ -544,7 +604,6 @@ class AppPesquisaMercado:
         )
         self.chk_utilizado.grid(row=2, column=4, columnspan=2, sticky="w", padx=4, pady=2)
 
-        # Coordenadas UTM
         frame_coords = ttk.Frame(frame_form)
         frame_coords.grid(row=3, column=0, columnspan=6, sticky="w", pady=2)
 
@@ -562,14 +621,13 @@ class AppPesquisaMercado:
 
         ttk.Label(frame_coords, text="Data:").pack(side="left", padx=(0, 2))
         self.txt_data = ttk.Entry(frame_coords, width=11)
-        self.txt_data.insert(0, "18/08/2026")
+        self.txt_data.insert(0, data_hoje_br())
         self.txt_data.pack(side="left", padx=(0, 10))
 
         ttk.Label(frame_coords, text="Link:").pack(side="left", padx=(0, 2))
         self.txt_link = ttk.Entry(frame_coords, width=36)
         self.txt_link.pack(side="left")
 
-        # Fotos
         frame_fotos = ttk.Frame(frame_form)
         frame_fotos.grid(row=4, column=0, columnspan=6, sticky="w", pady=2)
 
@@ -583,12 +641,10 @@ class AppPesquisaMercado:
         self.txt_foto2.pack(side="left", padx=4)
         ttk.Button(frame_fotos, text="Buscar", width=7, command=lambda: self._buscar_arquivo_foto(self.txt_foto2)).pack(side="left")
 
-        # Variáveis da Avaliação
         self.frame_vars = ttk.LabelFrame(self.container_principal, text=" Variáveis da Avaliação (Nota Agronômica automática ao escolher Aptidão e Situação) ", padding=6)
         self.frame_vars.pack(fill="x", padx=10, pady=2)
         self.widgets_dinamicos = {}
 
-        # Botões do Formulário
         frame_btn_cad = ttk.Frame(self.container_principal, padding=2)
         frame_btn_cad.pack(fill="x", padx=10)
 
@@ -665,7 +721,6 @@ class AppPesquisaMercado:
         self.tree.bind("<Double-1>", lambda event: self._carregar_para_edicao())
         self.root.bind("<Control-v>", lambda event: self._colar_dados_clipboard_atalho(event))
 
-        # Botões abaixo da Grade
         frame_botoes_grid = ttk.Frame(frame_tabela)
         frame_botoes_grid.pack(fill="x", pady=3)
         ttk.Button(frame_botoes_grid, text="✏ Carregar no Formulário", command=self._carregar_para_edicao).pack(side="left", padx=3)
@@ -674,7 +729,6 @@ class AppPesquisaMercado:
         ttk.Button(frame_botoes_grid, text="🗑 Excluir Selecionado(s)", command=self._excluir_dado).pack(side="left", padx=3)
         ttk.Button(frame_botoes_grid, text="📥 Importar Planilha (.xlsx)", command=self._importar_planilha_excel).pack(side="right", padx=3)
 
-        # --- PAINEL ESTATÍSTICO PRÉ-SISDEA ---
         self.frame_stats = tk.Frame(self.container_principal, bg="#e1e7ef", bd=1, relief="solid")
         self.frame_stats.pack(fill="x", padx=10, pady=2)
         self.lbl_estatisticas = tk.Label(
@@ -683,7 +737,7 @@ class AppPesquisaMercado:
             bg="#e1e7ef",
             fg="#1f3c5b",
             font=("Segoe UI", 9, "bold"),
-             pady=3
+            pady=3
         )
         self.lbl_estatisticas.pack(anchor="w", padx=10)
 
@@ -691,7 +745,6 @@ class AppPesquisaMercado:
         self.progress_bar.pack(fill="x", padx=12, pady=2)
         self.progress_bar.pack_forget()
 
-        # Botões de Exportação
         frame_acoes = ttk.Frame(self.container_principal, padding=4)
         frame_acoes.pack(fill="x", padx=10, pady=3)
 
@@ -734,6 +787,8 @@ class AppPesquisaMercado:
             self.tree.column(col_id, width=larg, minwidth=36, anchor=alinhamento, stretch=False)
 
     def _atualizar_interface_variaveis(self):
+        if not hasattr(self, "frame_vars"):
+            return
         for w in self.frame_vars.winfo_children():
             w.destroy()
         self.widgets_dinamicos.clear()
@@ -761,7 +816,6 @@ class AppPesquisaMercado:
         self._verificar_calculo_nota_agronomica()
 
     def _verificar_calculo_nota_agronomica(self):
-        """Preenche automaticamente a Nota Agronômica quando Aptidão e Situação/Acesso estão presentes."""
         w_apt = self.widgets_dinamicos.get("Aptidão")
         w_sit = self.widgets_dinamicos.get("Situação") or self.widgets_dinamicos.get("Acesso")
         w_nota = self.widgets_dinamicos.get("Nota Agronômica")
@@ -828,7 +882,7 @@ class AppPesquisaMercado:
         self.txt_coord_e.insert(0, e_val)
         self.txt_coord_s.delete(0, tk.END)
         self.txt_coord_s.insert(0, s_val)
-        messagebox.showinfo("Coordenadas Convertidas", f"Conversão concluída:\nZona: {zona}\nCoord. E: {e_val} m\nCoord. S: {s_val} m")
+        messagebox.showinfo("Coordenadas Convertidas", f"Conversão concluída (SIRGAS 2000 / WGS84):\nZona: {zona}\nCoord. E: {e_val} m\nCoord. S: {s_val} m")
 
     def _janela_config_variaveis(self):
         janela = tk.Toplevel(self.root)
@@ -898,7 +952,7 @@ class AppPesquisaMercado:
                 if var_ativa.get() and e_nome.get().strip():
                     opts = [op.strip() for op in e_opcoes.get().split(",") if op.strip()]
                     atuais.append({"nome": e_nome.get().strip(), "tipo": cb_tipo.get(), "opcoes": opts})
-            if not any(x["nome"].lower() == item_cat["nome"].lower() for x in atuais):
+            if not any(normalizar_chave_var(x["nome"]) == normalizar_chave_var(item_cat["nome"]) for x in atuais):
                 atuais.append(copy.deepcopy(item_cat))
             recarregar_linhas_editor(atuais)
 
@@ -930,7 +984,12 @@ class AppPesquisaMercado:
         ttk.Button(janela, text="💾 Salvar e Atualizar Grade", style="Primary.TButton", command=salvar).pack(pady=8)
 
     def _buscar_arquivo_foto(self, entry_widget):
-        caminho = filedialog.askopenfilename(filetypes=[("Imagens", "*.png;*.jpg;*.jpeg;*.webp")])
+        caminho = filedialog.askopenfilename(
+            filetypes=[
+                ("Imagens", "*.png *.jpg *.jpeg *.webp *.bmp"),
+                ("Todos os arquivos", "*.*")
+            ]
+        )
         if caminho:
             entry_widget.delete(0, tk.END)
             entry_widget.insert(0, caminho)
@@ -950,7 +1009,7 @@ class AppPesquisaMercado:
         self.txt_coord_e.delete(0, tk.END)
         self.txt_coord_s.delete(0, tk.END)
         self.txt_data.delete(0, tk.END)
-        self.txt_data.insert(0, "18/08/2026")
+        self.txt_data.insert(0, data_hoje_br())
         self.txt_link.delete(0, tk.END)
         self.txt_foto1.delete(0, tk.END)
         self.txt_foto2.delete(0, tk.END)
@@ -1100,7 +1159,6 @@ class AppPesquisaMercado:
             )
         )
 
-    # --- INTERAÇÃO ESTILO PLANILHA SISDEA NA GRADE ---
     def _ao_clicar_celula_grid(self, event):
         regiao = self.tree.identify("region", event.x, event.y)
         if regiao != "cell":
@@ -1124,7 +1182,6 @@ class AppPesquisaMercado:
 
         chave_col, titulo_col, _, _ = self.mapa_colunas_grid[col_idx]
 
-        # Se clicou na coluna ☑, alterna imediatamente Utilizado / Não utilizado
         if chave_col == "utilizado":
             dado["utilizado"] = not dado.get("utilizado", True)
             self._recarregar_grid()
@@ -1167,7 +1224,6 @@ class AppPesquisaMercado:
                 dado["variaveis_extras"] = {}
             dado["variaveis_extras"][nome_var] = novo_val
 
-            # Recalcula Nota Agronômica se editou Aptidão ou Situação na grade
             if nome_var in ("Aptidão", "Situação", "Acesso"):
                 apt = dado["variaveis_extras"].get("Aptidão", "")
                 sit = dado["variaveis_extras"].get("Situação") or dado["variaveis_extras"].get("Acesso", "")
@@ -1256,12 +1312,16 @@ class AppPesquisaMercado:
 
     # --- COLAR DIRETO DO EXCEL (CTRL+V ESTILO SISDEA) ---
     def _colar_dados_clipboard_atalho(self, event):
+        if not hasattr(self, "tree"):
+            return
         foco = self.root.focus_get()
         if isinstance(foco, (ttk.Entry, tk.Entry)):
             return
         self._colar_dados_clipboard()
 
     def _colar_dados_clipboard(self):
+        if not hasattr(self, "tree"):
+            return
         try:
             texto_clip = self.root.clipboard_get()
         except Exception:
@@ -1274,24 +1334,22 @@ class AppPesquisaMercado:
 
         linhas_split = [l.split("\t") for l in linhas_raw]
 
-        # Verifica se a primeira linha colada é um cabeçalho
         primeira = [c.strip().lower() for c in linhas_split[0]]
         tem_cabecalho = any(k in " ".join(primeira) for k in ["informante", "endereço", "endereco", "logradouro", "valor total", "município"])
 
         if tem_cabecalho and len(linhas_split) > 1:
-            df = pd.DataFrame(linhas_split[1:], columns=linhas_split[0])
+            n = len(linhas_split[0])
+            corpo = [(l + [""] * n)[:n] for l in linhas_split[1:]]
+            df = pd.DataFrame(corpo, columns=linhas_split[0])
             self._processar_dataframe_importado(df, origem="Área de Transferência (Ctrl+V)")
         else:
-            # Mapeamento posicional direto na ordem das colunas do SISDEA:
-            # Informante | Telefone | Endereço | Bairro | Município | Valor Total | Área | Variáveis...
             novos = []
-            un_atual = self.var_unidade.get()
+            un_atual = self.var_unidade.get() if hasattr(self, "var_unidade") else "m²"
             for cols in linhas_split:
                 if len(cols) < 2:
                     continue
-                # Se a coluna 0 for apenas o índice numérico D., desloca 1 coluna
                 offset = 1 if (cols[0].strip().isdigit() and len(cols) >= 7) else 0
-                 get_c = lambda idx: cols[idx + offset].strip() if (idx + offset) < len(cols) else ""
+                get_c = lambda idx: cols[idx + offset].strip() if (idx + offset) < len(cols) else ""
 
                 inf = get_c(0)
                 tel = get_c(1)
@@ -1320,7 +1378,7 @@ class AppPesquisaMercado:
                     "zona_utm": "",
                     "coord_e": "",
                     "coord_s": "",
-                    "data": self.txt_data.get().strip() or "18/08/2026",
+                    "data": self.txt_data.get().strip() or data_hoje_br(),
                     "link": "",
                     "foto1": "",
                     "foto2": "",
@@ -1439,7 +1497,7 @@ class AppPesquisaMercado:
             self._limpar_formulario()
 
     def _salvar_projeto(self):
-        caminho = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Projeto de Pesquisa (*.json)", "*.json")])
+        caminho = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Projeto de Pesquisa", "*.json")])
         if not caminho:
             return
         dados_salvar = {
@@ -1455,7 +1513,7 @@ class AppPesquisaMercado:
             messagebox.showerror("Erro", f"Erro ao salvar arquivo: {e}")
 
     def _executar_abertura_json(self):
-        caminho = filedialog.askopenfilename(filetypes=[("Projeto de Pesquisa (*.json)", "*.json")])
+        caminho = filedialog.askopenfilename(filetypes=[("Projeto de Pesquisa", "*.json")])
         if not caminho:
             return False
         try:
@@ -1483,7 +1541,7 @@ class AppPesquisaMercado:
         self._executar_abertura_json()
 
     def _importar_planilha_excel(self):
-        caminho = filedialog.askopenfilename(filetypes=[("Planilhas Excel", "*.xlsx;*.xls")])
+        caminho = filedialog.askopenfilename(filetypes=[("Planilhas Excel", "*.xlsx *.xls")])
         if not caminho:
             return
         try:
@@ -1509,27 +1567,40 @@ class AppPesquisaMercado:
 
         for col in df.columns:
             c_clean = str(col).strip().lower()
-            if "informante" in c_clean: mapeamento["informante"] = col
-            elif "telefone" in c_clean or "contato" in c_clean: mapeamento["telefone"] = col
-            elif "endereço" in c_clean or "endereco" in c_clean or "logradouro" in c_clean: mapeamento["endereco"] = col
-            elif "bairro" in c_clean: mapeamento["bairro"] = col
-            elif "município" in c_clean or "municipio" in c_clean: mapeamento["municipio"] = col
-            elif "valor total" in c_clean or "oferta" in c_clean: mapeamento["valor_total"] = col
-            elif "área terreno" in c_clean or "area terreno" in c_clean or c_clean.startswith("area") or c_clean.startswith("área"):
-                if "constru" not in c_clean:
-                    mapeamento["area_terreno"] = col
-                    if "(ha)" in c_clean:
-                        unidade_detectada_coluna = "ha"
-                    elif "(m²)" in c_clean or "(m2)" in c_clean:
-                        unidade_detectada_coluna = "m²"
-            elif "área construída" in c_clean or "area construida" in c_clean: mapeamento["area_construida"] = col
-            elif "coord. e" in c_clean or "coord e" in c_clean or "e (m)" in c_clean: mapeamento["coord_e"] = col
-            elif "coord. s" in c_clean or "coord s" in c_clean or "s (m)" in c_clean: mapeamento["coord_s"] = col
-            elif "zona" in c_clean: mapeamento["zona_utm"] = col
-            elif "data" in c_clean: mapeamento["data"] = col
-            elif "link" in c_clean: mapeamento["link"] = col
-            elif "unidade" in c_clean or "unid" in c_clean: mapeamento["unidade"] = col
-            elif "utilizado" in c_clean or "ativo" in c_clean: mapeamento["utilizado"] = col
+            if "informante" in c_clean:
+                mapeamento["informante"] = col
+            elif "telefone" in c_clean or "contato" in c_clean:
+                mapeamento["telefone"] = col
+            elif "endereço" in c_clean or "endereco" in c_clean or "logradouro" in c_clean:
+                mapeamento["endereco"] = col
+            elif "bairro" in c_clean:
+                mapeamento["bairro"] = col
+            elif "município" in c_clean or "municipio" in c_clean:
+                mapeamento["municipio"] = col
+            elif "valor total" in c_clean or "oferta" in c_clean:
+                mapeamento["valor_total"] = col
+            elif "área construída" in c_clean or "area construida" in c_clean or "constru" in c_clean:
+                mapeamento["area_construida"] = col
+            elif "área terreno" in c_clean or "area terreno" in c_clean or c_clean.startswith(("area", "área")):
+                mapeamento["area_terreno"] = col
+                if "(ha)" in c_clean:
+                    unidade_detectada_coluna = "ha"
+                elif "(m²)" in c_clean or "(m2)" in c_clean:
+                    unidade_detectada_coluna = "m²"
+            elif "coord. e" in c_clean or "coord e" in c_clean or "e (m)" in c_clean:
+                mapeamento["coord_e"] = col
+            elif "coord. s" in c_clean or "coord s" in c_clean or "s (m)" in c_clean:
+                mapeamento["coord_s"] = col
+            elif "zona" in c_clean:
+                mapeamento["zona_utm"] = col
+            elif "data" in c_clean:
+                mapeamento["data"] = col
+            elif "link" in c_clean:
+                mapeamento["link"] = col
+            elif "unidade" in c_clean or "unid" in c_clean:
+                mapeamento["unidade"] = col
+            elif "utilizado" in c_clean or "ativo" in c_clean:
+                mapeamento["utilizado"] = col
 
         novos_dados = []
         for _, row in df.iterrows():
@@ -1546,7 +1617,7 @@ class AppPesquisaMercado:
             elif unidade_detectada_coluna:
                 unidade = unidade_detectada_coluna
             else:
-                unidade = self.var_unidade.get()
+                unidade = self.var_unidade.get() if hasattr(self, "var_unidade") else "m²"
 
             utilizado_flag = True
             if "utilizado" in mapeamento and not pd.isna(row.get(mapeamento["utilizado"])):
@@ -1573,17 +1644,21 @@ class AppPesquisaMercado:
                 "zona_utm": str(row.get(mapeamento.get("zona_utm", ""), "")).replace("nan", "").strip(),
                 "coord_e": limpar_sufixo_coord(str(row.get(mapeamento.get("coord_e", ""), "")).replace("nan", "")),
                 "coord_s": limpar_sufixo_coord(str(row.get(mapeamento.get("coord_s", ""), "")).replace("nan", "")),
-                "data": str(row.get(mapeamento.get("data", "18/08/2026"))).replace("nan", "").strip(),
+                "data": str(row.get(mapeamento.get("data", data_hoje_br()))).replace("nan", "").strip(),
                 "link": str(row.get(mapeamento.get("link", ""), "")).replace("nan", "").strip(),
                 "foto1": "",
                 "foto2": "",
                 "variaveis_extras": {}
             }
 
+            # Casamento exato (normalizado) entre variáveis configuradas e colunas da planilha
             for v_cfg in self.variaveis_config:
+                chave_alvo = normalizar_chave_var(v_cfg["nome"])
                 for col_planilha in df.columns:
-                    if v_cfg["nome"].lower() in str(col_planilha).lower():
-                        registro["variaveis_extras"][v_cfg["nome"]] = str(row.get(col_planilha, "")).replace("nan", "").strip()
+                    if normalizar_chave_var(col_planilha) == chave_alvo:
+                        val_cel = row.get(col_planilha, "")
+                        registro["variaveis_extras"][v_cfg["nome"]] = "" if pd.isna(val_cel) else str(val_cel).strip()
+                        break
 
             apt = registro["variaveis_extras"].get("Aptidão", "")
             sit = registro["variaveis_extras"].get("Situação") or registro["variaveis_extras"].get("Acesso", "")
@@ -1600,6 +1675,23 @@ class AppPesquisaMercado:
         else:
             messagebox.showwarning("Aviso", "Nenhum dado válido encontrado para importação.")
 
+    def _preparar_imagem_compativel(self, stream_ou_caminho):
+        """Converte formatos como .webp para PNG em memória, garantindo compatibilidade total com python-docx."""
+        try:
+            with Image.open(stream_ou_caminho) as img:
+                formato = (img.format or "").upper()
+                if formato in ("JPEG", "JPG", "PNG", "BMP", "GIF", "TIFF"):
+                    if isinstance(stream_ou_caminho, io.BytesIO):
+                        stream_ou_caminho.seek(0)
+                    return stream_ou_caminho
+                buffer_png = io.BytesIO()
+                img.convert("RGB").save(buffer_png, format="PNG")
+                buffer_png.seek(0)
+                return buffer_png
+        except Exception as e:
+            logging.warning(f"Falha ao validar/converter imagem com Pillow: {e}")
+            return None
+
     def _baixar_imagem(self, caminho_ou_url):
         if not caminho_ou_url:
             return None
@@ -1607,10 +1699,12 @@ class AppPesquisaMercado:
         try:
             if caminho_ou_url.startswith("http://") or caminho_ou_url.startswith("https://"):
                 resp = requests.get(caminho_ou_url, timeout=12)
-                if resp.status_code == 200:
-                    return io.BytesIO(resp.content)
+                content_type = resp.headers.get("Content-Type", "").lower()
+                if resp.status_code == 200 and content_type.startswith("image/"):
+                    return self._preparar_imagem_compativel(io.BytesIO(resp.content))
+                logging.warning(f"URL não retornou uma imagem pública válida (Content-Type: {content_type}): {caminho_ou_url}")
             elif os.path.exists(caminho_ou_url):
-                return caminho_ou_url
+                return self._preparar_imagem_compativel(caminho_ou_url)
         except Exception as e:
             logging.warning(f"Erro ao carregar imagem '{caminho_ou_url}': {e}")
             return None
@@ -1621,7 +1715,7 @@ class AppPesquisaMercado:
             messagebox.showwarning("Aviso", "Nenhum dado cadastrado para exportar.")
             return
 
-        caminho = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Planilha Excel (*.xlsx)", "*.xlsx")])
+        caminho = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Planilha Excel", "*.xlsx")])
         if not caminho:
             return
 
@@ -1672,12 +1766,13 @@ class AppPesquisaMercado:
             messagebox.showwarning("Aviso", "Nenhum dado cadastrado para exportação.")
             return
 
-        caminho = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Documento Word (*.docx)", "*.docx")])
+        caminho = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Documento Word", "*.docx")])
         if not caminho:
             return
 
-        self.progress_bar.pack(fill="x", padx=12, pady=4)
-        self.progress_bar["value"] = 0
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.pack(fill="x", padx=12, pady=4)
+            self.progress_bar["value"] = 0
 
         snapshot_dados = copy.deepcopy(self.dados_pesquisas)
         snapshot_vars = copy.deepcopy(self.variaveis_config)
@@ -1694,6 +1789,9 @@ class AppPesquisaMercado:
         try:
             doc = Document()
             total_dados = len(dados_lista)
+
+            caminho_logo_enprol = os.path.join(BASE_DIR, "logo_enprol.png")
+            caminho_logo_copasa = os.path.join(BASE_DIR, "logo_copasa.png")
 
             section = doc.sections[0]
             if modelo_selecionado == "COPASA":
@@ -1714,7 +1812,11 @@ class AppPesquisaMercado:
                     f'<w:right w:val="single" w:sz="4" w:space="24" w:color="auto"/>'
                     f'</w:pgBorders>'
                 )
-                sectPr.append(pgBrd)
+                pgMar = sectPr.find(qn("w:pgMar"))
+                if pgMar is not None:
+                    pgMar.addnext(pgBrd)
+                else:
+                    sectPr.append(pgBrd)
 
                 hdr = section.header
                 t_logos = hdr.add_table(rows=1, cols=2, width=Inches(5.90))
@@ -1725,9 +1827,9 @@ class AppPesquisaMercado:
 
                 p_l1 = c_l1.paragraphs[0]
                 p_l1.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                if os.path.exists("logo_enprol.png"):
+                if os.path.exists(caminho_logo_enprol):
                     try:
-                        p_l1.add_run().add_picture("logo_enprol.png", height=Inches(0.42))
+                        p_l1.add_run().add_picture(caminho_logo_enprol, height=Inches(0.42))
                     except Exception:
                         r = p_l1.add_run("ENPROL")
                         r.bold = True
@@ -1743,9 +1845,9 @@ class AppPesquisaMercado:
 
                 p_l2 = c_l2.paragraphs[0]
                 p_l2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                if os.path.exists("logo_copasa.png"):
+                if os.path.exists(caminho_logo_copasa):
                     try:
-                        p_l2.add_run().add_picture("logo_copasa.png", height=Inches(0.42))
+                        p_l2.add_run().add_picture(caminho_logo_copasa, height=Inches(0.42))
                     except Exception:
                         r2 = p_l2.add_run("copasa")
                         r2.bold = True
@@ -1772,7 +1874,7 @@ class AppPesquisaMercado:
                     f'<w:right w:w="108" w:type="dxa"/>'
                     f'</w:tblCellMar>'
                 )
-                tblPr_f.append(tblCellMar)
+                inserir_ordenado(tblPr_f, tblCellMar, SUC_CMAR)
 
                 c_f0, c_f1, c_f2 = t_faixa.cell(0, 0), t_faixa.cell(0, 1), t_faixa.cell(0, 2)
                 c_f0.width = Inches(1.77)
@@ -1781,7 +1883,7 @@ class AppPesquisaMercado:
 
                 for c_f in (c_f0, c_f1, c_f2):
                     shd = parse_xml(f'<w:shd {nsdecls("w")} w:val="clear" w:color="auto" w:fill="4472C4"/>')
-                    c_f._tc.get_or_add_tcPr().append(shd)
+                    inserir_ordenado(c_f._tc.get_or_add_tcPr(), shd, SUC_TCPR[1:])
 
                 pf0 = c_f0.paragraphs[0]
                 pf0.paragraph_format.space_before = Pt(0)
@@ -1837,11 +1939,11 @@ class AppPesquisaMercado:
                         p_bar.paragraph_format.space_before = Pt(0)
                         p_bar.paragraph_format.space_after = Pt(4)
                         pBrd = parse_xml(
-                            f'<w:pBrd {nsdecls("w")}>'
+                            f'<w:pBdr {nsdecls("w")}>'
                             f'<w:bottom w:val="single" w:sz="12" w:space="1" w:color="245D8C"/>'
-                            f'</w:pBrd>'
+                            f'</w:pBdr>'
                         )
-                        p_bar._p.get_or_add_pPr().append(pBrd)
+                        inserir_ordenado(p_bar._p.get_or_add_pPr(), pBrd, SUC_PPR)
                     else:
                         p_sp = doc.add_paragraph()
                         p_sp.paragraph_format.space_before = Pt(0)
@@ -1863,7 +1965,7 @@ class AppPesquisaMercado:
                         f'<w:insideV w:val="none"/>'
                         f'</w:tblBorders>'
                     )
-                    tblPr_p.append(borders_p)
+                    inserir_ordenado(tblPr_p, borders_p, SUC_TBLPR)
                 else:
                     tabela.style = 'Table Grid'
 
@@ -1947,15 +2049,22 @@ class AppPesquisaMercado:
                         coord_s = limpar_sufixo_coord(dado.get("coord_s") or dado.get("Coord. S (m)", ""))
                         coord_texto = f"{zona_str}{coord_e} m E / {coord_s} m S" if coord_e or coord_s else ""
 
-                        # Rótulo padronizado para Coordenadas UTM
                         add_f_line(p_corpo, "Coordenadas UTM:", coord_texto)
                         loc_val = dado.get("localizacao") or dado.get("Localização", "Urbana")
                         add_f_line(p_corpo, "Localização:", loc_val)
                         p_corpo.add_run("\n")
-                        add_f_line(p_corpo, "Data:", dado.get("data") or dado.get("Data", ""))
+                        add_f_line(p_corpo, "Data:", dado.get("data") or dado.get("Data", data_hoje_br()))
 
-                        c_dados._tc.get_or_add_tcPr().append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:right w:val="nil"/></w:tcBorders>'))
-                        c_foto._tc.get_or_add_tcPr().append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="nil"/></w:tcBorders>'))
+                        inserir_ordenado(
+                            c_dados._tc.get_or_add_tcPr(),
+                            parse_xml(f'<w:tcBorders {nsdecls("w")}><w:right w:val="nil"/></w:tcBorders>'),
+                            SUC_TCPR
+                        )
+                        inserir_ordenado(
+                            c_foto._tc.get_or_add_tcPr(),
+                            parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="nil"/></w:tcBorders>'),
+                            SUC_TCPR
+                        )
 
                     else:
                         add_f_line(p_dados, "Logradouro:", dado.get("endereco") or dado.get("Endereço", ""))
@@ -1992,7 +2101,7 @@ class AppPesquisaMercado:
                         v_tot = dado.get("valor_total") if dado.get("valor_total") is not None else dado.get("Valor Total (R$)", 0.0)
                         add_f_line(p_dados, "Valor Total:", f"R$ {formatar_moeda_br(v_tot)}")
                         p_dados.add_run("\n")
-                        add_f_line(p_dados, "Data:", dado.get("data") or dado.get("Data", "18/08/2026"))
+                        add_f_line(p_dados, "Data:", dado.get("data") or dado.get("Data", data_hoje_br()))
 
                     img1 = self._baixar_imagem(dado.get("foto1") or dado.get("Foto1"))
                     img2 = self._baixar_imagem(dado.get("foto2") or dado.get("Foto2"))
@@ -2028,18 +2137,26 @@ class AppPesquisaMercado:
                         r_vazio.font.size = Pt(10)
 
                     if modelo_selecionado == "COPASA":
-                        tcPr_dados = c_dados._tc.get_or_add_tcPr()
-                        tcPr_dados.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:bottom w:val="nil"/><w:right w:val="nil"/></w:tcBorders>'))
-
-                        tcPr_foto = c_foto._tc.get_or_add_tcPr()
-                        tcPr_foto.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="nil"/><w:bottom w:val="nil"/></w:tcBorders>'))
+                        inserir_ordenado(
+                            c_dados._tc.get_or_add_tcPr(),
+                            parse_xml(f'<w:tcBorders {nsdecls("w")}><w:bottom w:val="nil"/><w:right w:val="nil"/></w:tcBorders>'),
+                            SUC_TCPR
+                        )
+                        inserir_ordenado(
+                            c_foto._tc.get_or_add_tcPr(),
+                            parse_xml(f'<w:tcBorders {nsdecls("w")}><w:left w:val="nil"/><w:bottom w:val="nil"/></w:tcBorders>'),
+                            SUC_TCPR
+                        )
 
                         r_lbl = tabela.add_row()
                         c_m = r_lbl.cells[0].merge(r_lbl.cells[1])
                         c_m.width = Inches(6.37)
-                        
-                        tcPr_m = c_m._tc.get_or_add_tcPr()
-                        tcPr_m.append(parse_xml(f'<w:tcBorders {nsdecls("w")}><w:top w:val="nil"/></w:tcBorders>'))
+
+                        inserir_ordenado(
+                            c_m._tc.get_or_add_tcPr(),
+                            parse_xml(f'<w:tcBorders {nsdecls("w")}><w:top w:val="nil"/></w:tcBorders>'),
+                            SUC_TCPR
+                        )
 
                         p_lbl = c_m.paragraphs[0]
                         p_lbl.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2050,22 +2167,25 @@ class AppPesquisaMercado:
                         r_num.font.size = Pt(10)
 
                     progresso = int(((i + 1) / total_dados) * 100)
-                    self.root.after(0, lambda p=progresso: self._atualizar_progresso(p))
+                    self.fila_eventos_ui.put(("progresso", progresso))
 
             doc.save(caminho)
-            self.root.after(0, self._concluir_exportacao)
+            self.fila_eventos_ui.put(("concluido", None))
         except Exception as e:
-            self.root.after(0, lambda err=e: self._falha_exportacao(err))
+            self.fila_eventos_ui.put(("erro", e))
 
     def _atualizar_progresso(self, valor):
-        self.progress_bar["value"] = valor
+        if hasattr(self, "progress_bar"):
+            self.progress_bar["value"] = valor
 
     def _concluir_exportacao(self):
-        self.progress_bar.pack_forget()
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.pack_forget()
         messagebox.showinfo("Sucesso", "Fichas de Pesquisa no Word geradas com sucesso!")
 
     def _falha_exportacao(self, err):
-        self.progress_bar.pack_forget()
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.pack_forget()
         messagebox.showerror("Erro na Exportação", f"Ocorreu um erro ao gerar o documento Word: {err}")
 
 
