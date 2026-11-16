@@ -27,6 +27,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals()
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".pesquisa_mercado")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config_variaveis.json")
+AUTOSAVE_FILE = os.path.join(CONFIG_DIR, "autosave_projeto.json")
 
 # --- ORDEM DO SCHEMA OPENXML (WORD) ---
 SUC_TCPR  = ["w:shd", "w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText", "w:vAlign", "w:hideMark"]
@@ -36,7 +37,6 @@ SUC_PPR   = ["w:shd", "w:tabs", "w:suppressAutoHyphens", "w:spacing", "w:ind", "
 
 
 def inserir_ordenado(pai, el, sucessores):
-    """Insere elemento XML respeitando a sequência estrita de tags do schema WordprocessingML."""
     for tag in sucessores:
         achado = pai.find(qn(tag))
         if achado is not None:
@@ -45,7 +45,7 @@ def inserir_ordenado(pai, el, sucessores):
     pai.append(el)
 
 
-# --- TABELA 02: NOTA AGRONÔMICA (Adaptado de Kozma 1984 x IN RFB 1877/2019) ---
+# --- TABELA 02: NOTA AGRONÔMICA (Kozma 1984 x IN RFB 1877/2019) ---
 TABELA_NOTA_AGRONOMICA = {
     "I":   {"Ótima": "1,00", "Muito Boa": "0,95", "Boa": "0,90", "Desfavorável": "0,80", "Má": "0,75", "Péssima": "0,70"},
     "II":  {"Ótima": "0,80", "Muito Boa": "0,76", "Boa": "0,72", "Desfavorável": "0,64", "Má": "0,60", "Péssima": "0,56"},
@@ -75,7 +75,6 @@ OPCOES_SITUACAO = [
     "Péssima"
 ]
 
-# --- PERFIS PRÉ-CADASTRADOS DE VARIÁVEIS ---
 DEFAULT_VARS_PADRAO = [
     {"nome": "Via", "tipo": "codigo", "opcoes": ["", "1 - Local", "2 - Coletora", "3 - Arterial"]},
     {"nome": "Uso", "tipo": "codigo", "opcoes": ["", "1 - Residencial", "2 - Comercial", "3 - Misto"]},
@@ -98,25 +97,6 @@ DEFAULT_VARS_COPASA = [
     {"nome": "Informações", "tipo": "texto", "opcoes": []}
 ]
 
-CATALOGO_VARIAVEIS_USUAIS = [
-    {"nome": "Via", "tipo": "codigo", "opcoes": ["", "1 - Local", "2 - Coletora", "3 - Arterial"]},
-    {"nome": "Uso", "tipo": "codigo", "opcoes": ["", "1 - Residencial", "2 - Comercial", "3 - Misto"]},
-    {"nome": "Testada (m)", "tipo": "numero", "opcoes": []},
-    {"nome": "PGV (R$)", "tipo": "numero", "opcoes": []},
-    {"nome": "PIB (R$)", "tipo": "numero", "opcoes": []},
-    {"nome": "Condição", "tipo": "codigo", "opcoes": ["", "1 - Oferta", "2 - Transação"]},
-    {"nome": "Distância ao Centro (m)", "tipo": "numero", "opcoes": []},
-    {"nome": "Topografia", "tipo": "codigo", "opcoes": ["", "1 - Plano", "2 - Aclive/Declive", "3 - Irregular"]},
-    {"nome": "Padrão Construtivo", "tipo": "codigo", "opcoes": ["", "1 - Baixo", "2 - Normal", "3 - Alto"]},
-    {"nome": "Aptidão Agrícola", "tipo": "codigo", "opcoes": OPCOES_APTIDAO},
-    {"nome": "Situação", "tipo": "codigo", "opcoes": OPCOES_SITUACAO},
-    {"nome": "Nota Agronômica", "tipo": "numero", "opcoes": []},
-    {"nome": "Benfeitoria", "tipo": "codigo", "opcoes": ["", "1 - Sem Benfeitorias", "2 - Com Benfeitorias", "3 - Produtiva"]},
-    {"nome": "Frente", "tipo": "texto", "opcoes": ["Não informado"]},
-    {"nome": "Via de acesso", "tipo": "codigo", "opcoes": ["", "pavimentada", "não pavimentada"]},
-    {"nome": "Informações", "tipo": "texto", "opcoes": []}
-]
-
 
 def data_hoje_br():
     return datetime.now().strftime("%d/%m/%Y")
@@ -124,16 +104,14 @@ def data_hoje_br():
 
 def normalizar_chave_var(nome):
     s = str(nome).strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    return s
+    return re.sub(r"\s+", " ", s)
 
 
 def calcular_nota_agronomica_flexivel(variaveis_extras):
-    """Busca flexível: localiza chaves iniciadas em 'aptid' e 'situa' ou 'acess'."""
     apt = ""
     sit = ""
     for k, v in variaveis_extras.items():
-        k_low = k.strip().lower()
+        k_low = normalizar_chave_var(k)
         if k_low.startswith("aptid"):
             apt = str(v)
         elif k_low.startswith("situa") or k_low.startswith("acess"):
@@ -156,7 +134,6 @@ def calcular_nota_agronomica_flexivel(variaveis_extras):
 
 
 def converter_latlon_para_utm(texto_coord):
-    """Extrai Lat/Long (suportando vírgula e ponto) e converte para UTM (SIRGAS 2000)."""
     if not texto_coord:
         return None
     texto_limpo = str(texto_coord).replace(",", ".")
@@ -218,7 +195,7 @@ def converter_para_float(texto):
         val_f = float(texto)
         return 0.0 if math.isnan(val_f) else val_f
     s = str(texto).replace("R$", "").replace("m²", "").replace("ha", "").strip()
-    if not s or s.lower() == "nan":
+    if not s or s.lower() in ("nan", "nat", "none"):
         return 0.0
     if "." in s and "," in s:
         s = s.replace(".", "").replace(",", ".")
@@ -260,10 +237,35 @@ def limpar_sufixo_coord(coord_str):
 
 
 def sanitizar_texto_celula(txt):
-    """Remove quebras de linha e tabulações para evitar cortes visuais na grade e laudo."""
-    if not txt:
+    if txt is None or pd.isna(txt):
         return ""
-    return re.sub(r'[\r\n\t]+', ' ', str(txt)).strip()
+    s = str(txt).strip()
+    if s.lower() in ("nan", "nat", "none"):
+        return ""
+    return re.sub(r'[\r\n\t]+', ' ', s).strip()
+
+
+def redimensionar_e_corrigir_imagem(caminho_ou_stream, max_largura=1200, max_altura=900):
+    try:
+        if isinstance(caminho_ou_stream, io.BytesIO):
+            img = Image.open(caminho_ou_stream)
+        else:
+            if not os.path.exists(caminho_ou_stream):
+                return None
+            img = Image.open(caminho_ou_stream)
+        
+        img = ImageOps.exif_transpose(img)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        
+        img.thumbnail((max_largura, max_altura), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=88)
+        buffer.seek(0)
+        return buffer
+    except Exception as e:
+        logging.warning(f"Erro ao processar imagem: {e}")
+        return None
 
 
 def normalizar_url_gdrive(url):
@@ -315,21 +317,23 @@ def normalizar_dado(dado):
     else:
         unitario = converter_para_float(unitario)
 
-    zona_utm = dado.get("zona_utm") or dado.get("Zona UTM") or ""
-    coord_e = dado.get("coord_e") or dado.get("Coord. E (m)") or ""
-    coord_s = dado.get("coord_s") or dado.get("Coord. S (m)") or ""
-    data = dado.get("data") or dado.get("Data") or data_hoje_br()
-    link = dado.get("link") or dado.get("Link") or ""
-    foto1 = dado.get("foto1") or dado.get("Foto1") or ""
-    foto2 = dado.get("foto2") or dado.get("Foto2") or ""
-    localizacao = dado.get("localizacao") or dado.get("Localização") or ("Rural" if unidade == "ha" else "Urbana")
+    zona_utm = sanitizar_texto_celula(dado.get("zona_utm") or dado.get("Zona UTM") or "")
+    coord_e = limpar_sufixo_coord(sanitizar_texto_celula(dado.get("coord_e") or dado.get("Coord. E (m)") or ""))
+    coord_s = limpar_sufixo_coord(sanitizar_texto_celula(dado.get("coord_s") or dado.get("Coord. S (m)") or ""))
+    data = sanitizar_texto_celula(dado.get("data") or dado.get("Data") or data_hoje_br())
+    link = sanitizar_texto_celula(dado.get("link") or dado.get("Link") or "")
+    foto1 = sanitizar_texto_celula(dado.get("foto1") or dado.get("Foto1") or "")
+    foto2 = sanitizar_texto_celula(dado.get("foto2") or dado.get("Foto2") or "")
+    localizacao = sanitizar_texto_celula(dado.get("localizacao") or dado.get("Localização") or ("Rural" if unidade == "ha" else "Urbana"))
 
     vars_extras = dado.get("variaveis_extras") or dado.get("VariaveisExtras") or {}
     vars_sanitizadas = {k: sanitizar_texto_celula(v) for k, v in vars_extras.items()}
 
     nota_auto = calcular_nota_agronomica_flexivel(vars_sanitizadas)
-    if nota_auto and not vars_sanitizadas.get("Nota Agronômica"):
-        vars_sanitizadas["Nota Agronômica"] = nota_auto
+    if nota_auto:
+        for k in vars_sanitizadas:
+            if normalizar_chave_var(k) == "nota agronômica":
+                vars_sanitizadas[k] = nota_auto
 
     return {
         "dado_id": int(d_id),
@@ -344,14 +348,14 @@ def normalizar_dado(dado):
         "area_construida": float(area_construida),
         "unitario": float(unitario) if unitario else 0.0,
         "unidade": str(unidade).strip(),
-        "localizacao": str(localizacao).strip(),
-        "zona_utm": str(zona_utm).strip(),
-        "coord_e": limpar_sufixo_coord(str(coord_e)),
-        "coord_s": limpar_sufixo_coord(str(coord_s)),
-        "data": str(data).strip(),
-        "link": str(link).strip(),
-        "foto1": str(foto1).strip(),
-        "foto2": str(foto2).strip(),
+        "localizacao": localizacao,
+        "zona_utm": zona_utm,
+        "coord_e": coord_e,
+        "coord_s": coord_s,
+        "data": data,
+        "link": link,
+        "foto1": foto1,
+        "foto2": foto2,
         "variaveis_extras": vars_sanitizadas
     }
 
@@ -359,22 +363,23 @@ def normalizar_dado(dado):
 class AppPesquisaMercado:
     def __init__(self, root):
         self.root = root
-        self.root.title("ENPROL - Sistema de Pesquisa de Mercado v6.3 (Padrão SISDEA Pro)")
-        self.root.geometry("1220x860")
-        self.root.minsize(1050, 740)
+        self.root.title("ENPROL - Sistema de Pesquisa de Mercado v7.0 (Padrão SISDEA Pro)")
+        self.root.geometry("1280x880")
+        self.root.minsize(1080, 740)
 
         self._configurar_estilos()
 
         self.modelo_ativo = "PADRAO"
         self.dados_pesquisas = []
-        self.item_em_edicao = None
         self.variaveis_config = self._carregar_config_variaveis()
         self.celula_ativa = {"dado_id": None, "campo": None, "rotulo": ""}
         self.fila_eventos_ui = queue.Queue()
+        self.painel_lateral_visivel = False
 
         self.container_principal = ttk.Frame(self.root)
         self.container_principal.pack(fill="both", expand=True)
 
+        self.root.protocol("WM_DELETE_WINDOW", self._ao_fechar_janela)
         self.root.after(100, self._processar_fila_ui)
         self._exibir_tela_hub()
 
@@ -437,6 +442,25 @@ class AppPesquisaMercado:
         except Exception as e:
             messagebox.showerror("Erro ao salvar variáveis", str(e))
 
+    def _autosave(self):
+        try:
+            dados_salvar = {
+                "modelo": self.modelo_ativo,
+                "variaveis_config": self.variaveis_config,
+                "pesquisas": self.dados_pesquisas
+            }
+            with open(AUTOSAVE_FILE, "w", encoding="utf-8") as f:
+                json.dump(dados_salvar, f, ensure_ascii=False, indent=4)
+        except Exception:
+            pass
+
+    def _ao_fechar_janela(self):
+        if self.dados_pesquisas:
+            self._autosave()
+            if messagebox.askyesno("Sair do Sistema", "Deseja salvar o projeto atual antes de fechar?"):
+                self._salvar_projeto()
+        self.root.destroy()
+
     # --- HUB INICIAL ---
     def _exibir_tela_hub(self):
         self._limpar_container()
@@ -445,10 +469,10 @@ class AppPesquisaMercado:
         frame_hub = ttk.Frame(self.container_principal, padding=40)
         frame_hub.place(relx=0.5, rely=0.5, anchor="center")
 
-        lbl_logo = ttk.Label(frame_hub, text="SISTEMA DE PESQUISA DE MERCADO v6.3", font=("Segoe UI", 18, "bold"), foreground="#1f3c5b")
+        lbl_logo = ttk.Label(frame_hub, text="SISTEMA DE PESQUISA DE MERCADO v7.0", font=("Segoe UI", 18, "bold"), foreground="#1f3c5b")
         lbl_logo.pack(pady=(0, 5))
 
-        lbl_sub = ttk.Label(frame_hub, text="Integração Direta SISDEA • Automação Agronômica • Relatórios Word", font=("Segoe UI", 10), foreground="#555555")
+        lbl_sub = ttk.Label(frame_hub, text="Grade Integrada SISDEA • Edição Direta • Painel Lateral de Mídia", font=("Segoe UI", 10), foreground="#555555")
         lbl_sub.pack(pady=(0, 30))
 
         btn_novo = ttk.Button(frame_hub, text="📄  Criar Novo Arquivo / Projeto", style="Hub.TButton", width=40, command=self._popup_escolha_modelo)
@@ -460,10 +484,33 @@ class AppPesquisaMercado:
         btn_importar = ttk.Button(frame_hub, text="📥  Importar Dados de Planilha (.xlsx)", style="Hub.TButton", width=40, command=self._importar_planilha_hub)
         btn_importar.pack(pady=7)
 
-        btn_sair = ttk.Button(frame_hub, text="🚪  Sair do Sistema", width=40, command=self.root.quit)
+        if os.path.exists(AUTOSAVE_FILE):
+            btn_auto = ttk.Button(frame_hub, text="🔄  Recuperar Sessão Anterior (Autosave)", style="Accent.TButton", width=40, command=self._carregar_autosave)
+            btn_auto.pack(pady=7)
+
+        btn_sair = ttk.Button(frame_hub, text="🚪  Sair do Sistema", width=40, command=self._ao_fechar_janela)
         btn_sair.pack(pady=(20, 0))
 
+    def _carregar_autosave(self):
+        if not os.path.exists(AUTOSAVE_FILE):
+            return
+        try:
+            with open(AUTOSAVE_FILE, "r", encoding="utf-8") as f:
+                conteudo = json.load(f)
+            self.modelo_ativo = conteudo.get("modelo", "PADRAO")
+            self.variaveis_config = conteudo.get("variaveis_config") or copy.deepcopy(DEFAULT_VARS_PADRAO)
+            raw_pesquisas = conteudo.get("pesquisas", [])
+            self.dados_pesquisas = [normalizar_dado(d) for d in raw_pesquisas]
+            self._unidade_padrao_inicial = "ha" if self.modelo_ativo == "PADRAO" and any(d.get("unidade") == "ha" for d in self.dados_pesquisas) else "m²"
+            self._exibir_tela_trabalho()
+            messagebox.showinfo("Recuperado", "Sessão anterior recuperada com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Não foi possível recuperar o autosave: {e}")
+
     def _popup_escolha_modelo(self, callback_pos_confirmacao=None):
+        if self.dados_pesquisas and not messagebox.askyesno("Novo Projeto", "Criar um novo projeto apagará os dados atuais. Deseja continuar?"):
+            return
+
         janela = tk.Toplevel(self.root)
         janela.title("Selecionar Modelo e Perfil Inicial")
         janela.geometry("480x310")
@@ -509,13 +556,11 @@ class AppPesquisaMercado:
     def _importar_planilha_hub(self):
         self._popup_escolha_modelo(callback_pos_confirmacao=self._importar_planilha_excel)
 
-    # --- TELA DE TRABALHO ---
+    # --- TELA DE TRABALHO PRINCIPAL ---
     def _exibir_tela_trabalho(self):
         self._limpar_container()
         self._criar_menu_superior()
-        self._criar_layout_operacional()
-        self._atualizar_interface_variaveis()
-        self._configurar_colunas_grid()
+        self._criar_layout_operacional_v7()
         self._recarregar_grid()
 
     def _criar_menu_superior(self):
@@ -530,7 +575,7 @@ class AppPesquisaMercado:
         menu_arquivo.add_command(label="📥 Importar Planilha Excel...", command=self._importar_planilha_excel)
         menu_arquivo.add_command(label="📋 Colar Linhas do Excel (Ctrl+V)", command=self._colar_dados_clipboard)
         menu_arquivo.add_separator()
-        menu_arquivo.add_command(label="Sair", command=self.root.quit)
+        menu_arquivo.add_command(label="Sair", command=self._ao_fechar_janela)
         menubar.add_cascade(label="Arquivo", menu=menu_arquivo)
 
         menu_config = tk.Menu(menubar, tearoff=0)
@@ -549,146 +594,43 @@ class AppPesquisaMercado:
         if tipo == "URBANO":
             self.modelo_ativo = "PADRAO"
             self.variaveis_config = copy.deepcopy(DEFAULT_VARS_PADRAO)
-            self.var_unidade.set("m²")
+            self._unidade_padrao_inicial = "m²"
         elif tipo == "RURAL":
             self.modelo_ativo = "PADRAO"
             self.variaveis_config = copy.deepcopy(DEFAULT_VARS_RURAL)
-            self.var_unidade.set("ha")
+            self._unidade_padrao_inicial = "ha"
         elif tipo == "COPASA":
             self.modelo_ativo = "COPASA"
             self.variaveis_config = copy.deepcopy(DEFAULT_VARS_COPASA)
-            self.var_unidade.set("m²")
+            self._unidade_padrao_inicial = "m²"
         self._salvar_config_variaveis()
-        self._atualizar_interface_variaveis()
         self._configurar_colunas_grid()
         self._recarregar_grid()
         if hasattr(self, "lbl_info_mod"):
             mod_label = "Modelo 1: Padrão / Memória de Cálculo" if self.modelo_ativo == "PADRAO" else "Modelo 2: Contrato COPASA"
             self.lbl_info_mod.config(text=f"Modo Ativo: {mod_label}")
 
-    def _criar_layout_operacional(self):
+    def _criar_layout_operacional_v7(self):
+        # 1. Barra de Topo / Informações
         frame_topo_info = ttk.Frame(self.container_principal)
-        frame_topo_info.pack(fill="x", padx=12, pady=(4, 0))
+        frame_topo_info.pack(fill="x", padx=10, pady=(4, 2))
 
         mod_label = "Modelo 1: Padrão / Memória de Cálculo" if self.modelo_ativo == "PADRAO" else "Modelo 2: Contrato COPASA"
         self.lbl_info_mod = ttk.Label(frame_topo_info, text=f"Modo Ativo: {mod_label}", font=("Segoe UI", 9, "bold"), foreground="#1f3c5b")
         self.lbl_info_mod.pack(side="left")
 
-        ttk.Button(frame_topo_info, text="🌐 Lat/Long ou Link Maps ➔ UTM", command=self._janela_conversor_utm).pack(side="right", padx=4)
+        ttk.Button(frame_topo_info, text="📁 Painel de Fotos & Mídia", style="Accent.TButton", command=self._alternar_painel_lateral).pack(side="right", padx=4)
+        ttk.Button(frame_topo_info, text="🌐 Lat/Long ➔ UTM", command=self._janela_conversor_utm).pack(side="right", padx=4)
         ttk.Button(frame_topo_info, text="📊 Tabela Nota Agronômica", command=self._mostrar_tabela_nota_agronomica).pack(side="right", padx=4)
 
-        frame_form = ttk.LabelFrame(self.container_principal, text=" Cadastro e Edição do Dado de Mercado ", padding=6)
-        frame_form.pack(fill="x", padx=10, pady=3)
-
-        ttk.Label(frame_form, text="Informante:").grid(row=0, column=0, sticky="w")
-        self.txt_informante = ttk.Entry(frame_form, width=22)
-        self.txt_informante.grid(row=0, column=1, padx=4, pady=2, sticky="w")
-
-        ttk.Label(frame_form, text="Telefone:").grid(row=0, column=2, sticky="w")
-        self.txt_telefone = ttk.Entry(frame_form, width=20)
-        self.txt_telefone.grid(row=0, column=3, padx=4, pady=2, sticky="w")
-
-        ttk.Label(frame_form, text="Logradouro/Endereço:").grid(row=0, column=4, sticky="w")
-        self.txt_endereco = ttk.Entry(frame_form, width=28)
-        self.txt_endereco.grid(row=0, column=5, padx=4, pady=2, sticky="w")
-
-        ttk.Label(frame_form, text="Bairro:").grid(row=1, column=0, sticky="w")
-        self.txt_bairro = ttk.Entry(frame_form, width=22)
-        self.txt_bairro.grid(row=1, column=1, padx=4, pady=2, sticky="w")
-
-        ttk.Label(frame_form, text="Município:").grid(row=1, column=2, sticky="w")
-        self.txt_municipio = ttk.Entry(frame_form, width=20)
-        self.txt_municipio.grid(row=1, column=3, padx=4, pady=2, sticky="w")
-
-        ttk.Label(frame_form, text="Valor Total (R$):").grid(row=1, column=4, sticky="w")
-        self.txt_valor = ttk.Entry(frame_form, width=20)
-        self.txt_valor.grid(row=1, column=5, padx=4, pady=2, sticky="w")
-
-        ttk.Label(frame_form, text="Área Terreno:").grid(row=2, column=0, sticky="w")
-        frame_area = ttk.Frame(frame_form)
-        frame_area.grid(row=2, column=1, sticky="w", padx=4, pady=2)
-        self.txt_area = ttk.Entry(frame_area, width=13)
-        self.txt_area.pack(side="left")
-        un_ini = getattr(self, "_unidade_padrao_inicial", "ha" if self.modelo_ativo == "PADRAO" else "m²")
-        self.var_unidade = tk.StringVar(value=un_ini)
-        self.cb_unidade = ttk.Combobox(frame_area, textvariable=self.var_unidade, values=["m²", "ha"], width=5, state="readonly")
-        self.cb_unidade.pack(side="left", padx=2)
-
-        ttk.Label(frame_form, text="Área Const. (m²):").grid(row=2, column=2, sticky="w")
-        self.txt_area_const = ttk.Entry(frame_form, width=20)
-        self.txt_area_const.grid(row=2, column=3, padx=4, pady=2, sticky="w")
-
-        self.var_utilizado = tk.BooleanVar(value=True)
-        self.chk_utilizado = ttk.Checkbutton(
-            frame_form,
-            text="Utilizado no Modelo (Desmarcar = 'Não utilizado no modelo')",
-            variable=self.var_utilizado
-        )
-        self.chk_utilizado.grid(row=2, column=4, columnspan=2, sticky="w", padx=4, pady=2)
-
-        frame_coords = ttk.Frame(frame_form)
-        frame_coords.grid(row=3, column=0, columnspan=6, sticky="w", pady=2)
-
-        ttk.Label(frame_coords, text="Zona UTM:", foreground="#b22222", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 2))
-        self.txt_zona = ttk.Entry(frame_coords, width=7)
-        self.txt_zona.pack(side="left", padx=(0, 8))
-
-        ttk.Label(frame_coords, text="Coord. E (m):").pack(side="left", padx=(0, 2))
-        self.txt_coord_e = ttk.Entry(frame_coords, width=15)
-        self.txt_coord_e.pack(side="left", padx=(0, 8))
-
-        ttk.Label(frame_coords, text="Coord. S (m):").pack(side="left", padx=(0, 2))
-        self.txt_coord_s = ttk.Entry(frame_coords, width=15)
-        self.txt_coord_s.pack(side="left", padx=(0, 8))
-
-        ttk.Label(frame_coords, text="Data:").pack(side="left", padx=(0, 2))
-        self.txt_data = ttk.Entry(frame_coords, width=11)
-        self.txt_data.insert(0, data_hoje_br())
-        self.txt_data.pack(side="left", padx=(0, 10))
-
-        ttk.Label(frame_coords, text="Link:").pack(side="left", padx=(0, 2))
-        self.txt_link = ttk.Entry(frame_coords, width=36)
-        self.txt_link.pack(side="left")
-
-        frame_fotos = ttk.Frame(frame_form)
-        frame_fotos.grid(row=4, column=0, columnspan=6, sticky="w", pady=2)
-
-        ttk.Label(frame_fotos, text="Foto 1 (Imóvel/Drone):").pack(side="left")
-        self.txt_foto1 = ttk.Entry(frame_fotos, width=34)
-        self.txt_foto1.pack(side="left", padx=4)
-        ttk.Button(frame_fotos, text="Buscar", width=7, command=lambda: self._buscar_arquivo_foto(self.txt_foto1)).pack(side="left", padx=(0, 12))
-
-        ttk.Label(frame_fotos, text="Foto 2 (Print Anúncio):").pack(side="left")
-        self.txt_foto2 = ttk.Entry(frame_fotos, width=34)
-        self.txt_foto2.pack(side="left", padx=4)
-        ttk.Button(frame_fotos, text="Buscar", width=7, command=lambda: self._buscar_arquivo_foto(self.txt_foto2)).pack(side="left")
-
-        self.frame_vars = ttk.LabelFrame(self.container_principal, text=" Variáveis da Avaliação (Nota Agronômica automática ao escolher Aptidão e Situação) ", padding=6)
-        self.frame_vars.pack(fill="x", padx=10, pady=2)
-        self.widgets_dinamicos = {}
-
-        frame_btn_cad = ttk.Frame(self.container_principal, padding=2)
-        frame_btn_cad.pack(fill="x", padx=10)
-
-        self.btn_salvar_dado = ttk.Button(frame_btn_cad, text="➕ Adicionar à Grade", style="Primary.TButton", command=self._adicionar_ou_salvar_dado)
-        self.btn_salvar_dado.pack(side="left", padx=3)
-
-        ttk.Button(frame_btn_cad, text="🧹 Limpar Campos", command=self._limpar_formulario).pack(side="left", padx=3)
-
-        self.btn_cancelar_edicao = ttk.Button(frame_btn_cad, text="✖ Cancelar Edição", command=self._limpar_formulario, state="disabled")
-        self.btn_cancelar_edicao.pack(side="left", padx=3)
-
-        ttk.Button(frame_btn_cad, text="📋 Colar do Excel (Ctrl+V)", style="Accent.TButton", command=self._colar_dados_clipboard).pack(side="left", padx=10)
-        ttk.Button(frame_btn_cad, text="⚙ Configurar Variáveis / Perfis", command=self._janela_config_variaveis).pack(side="right", padx=3)
-
-        # --- BARRA DE FÓRMULA / EDIÇÃO RÁPIDA ESTILO SISDEA ---
-        frame_barra_sisdea = ttk.Frame(self.container_principal, padding=(10, 3))
+        # 2. Barra de Edição Rápida (fx estilo SISDEA)
+        frame_barra_sisdea = ttk.Frame(self.container_principal, padding=(10, 2))
         frame_barra_sisdea.pack(fill="x")
 
         self.lbl_celula_sisdea = tk.Label(
             frame_barra_sisdea,
-            text="Campo / D.",
-            width=22,
+            text="fx [ Clique em uma célula ]",
+            width=26,
             anchor="w",
             bg="#e1e7ef",
             fg="#1f3c5b",
@@ -696,6 +638,7 @@ class AppPesquisaMercado:
             relief="groove",
             padx=6
         )
+        self.lbl_celula_siszee = self.lbl_celula_sisdea
         self.lbl_celula_sisdea.pack(side="left")
 
         tk.Label(frame_barra_sisdea, text=" ➔ ", bg="#f4f6f9", fg="#2b7a78", font=("Segoe UI", 11, "bold")).pack(side="left")
@@ -704,26 +647,24 @@ class AppPesquisaMercado:
         self.txt_barra_sisdea.pack(side="left", fill="x", expand=True, padx=4)
         self.txt_barra_sisdea.bind("<Return>", lambda event: self._confirmar_edicao_barra_sisdea())
 
-        ttk.Button(frame_barra_sisdea, text="✔ Aplicar na Célula (Enter)", command=self._confirmar_edicao_barra_sisdea).pack(side="left", padx=3)
+        ttk.Button(frame_barra_sisdea, text="✔ Aplicar (Enter)", command=self._confirmar_edicao_barra_sisdea).pack(side="left", padx=3)
+        ttk.Button(frame_barra_sisdea, text="➕ Nova Linha", style="Primary.TButton", command=self._adicionar_linha_vazia_grade).pack(side="left", padx=3)
 
-        # --- GRADE ESTILO PLANILHA SISDEA ---
-        frame_tabela = ttk.LabelFrame(
-            self.container_principal,
-            text=" Grade de Dados (Clique na coluna '☑' para Ativar/Desativar • Clique simples edita na barra • Duplo clique carrega no formulário) ",
-            padding=6
-        )
-        frame_tabela.pack(fill="both", expand=True, padx=10, pady=2)
+        # 3. Layout Principal: Grade + Painel Lateral (Split)
+        self.pane_principal = tk.PanedWindow(self.container_principal, orient="horizontal", sashrelief="raised", bg="#d0d7de")
+        self.pane_principal.pack(fill="both", expand=True, padx=10, pady=2)
 
-        frame_tree_container = ttk.Frame(frame_tabela)
-        frame_tree_container.pack(fill="both", expand=True)
+        # Frame da Grade
+        self.frame_grade_container = ttk.Frame(self.pane_principal)
+        self.pane_principal.add(self.frame_grade_container, stretch="always")
 
-        self.scroll_y = ttk.Scrollbar(frame_tree_container, orient="vertical")
-        self.scroll_x = ttk.Scrollbar(frame_tree_container, orient="horizontal")
+        self.scroll_y = ttk.Scrollbar(self.frame_grade_container, orient="vertical")
+        self.scroll_x = ttk.Scrollbar(self.frame_grade_container, orient="horizontal")
 
         self.tree = ttk.Treeview(
-            frame_tree_container,
+            self.frame_grade_container,
             show="headings",
-            height=9,
+            height=14,
             yscrollcommand=self.scroll_y.set,
             xscrollcommand=self.scroll_x.set,
             selectmode="extended"
@@ -740,17 +681,16 @@ class AppPesquisaMercado:
         self.tree.tag_configure("ativo_impar", background="#f7FAFC")
 
         self.tree.bind("<ButtonRelease-1>", self._ao_clicar_celula_grid)
-        self.tree.bind("<Double-1>", lambda event: self._carregar_para_edicao())
+        self.tree.bind("<Double-1>", lambda event: self._abrir_painel_lateral_selecionado())
         self.root.bind("<Control-v>", lambda event: self._colar_dados_clipboard_atalho(event))
 
-        frame_botoes_grid = ttk.Frame(frame_tabela)
-        frame_botoes_grid.pack(fill="x", pady=3)
-        ttk.Button(frame_botoes_grid, text="✏ Carregar no Formulário", command=self._carregar_para_edicao).pack(side="left", padx=3)
-        ttk.Button(frame_botoes_grid, text="☑ Alternar Utilizado/Não Utilizado", command=self._alternar_utilizado_selecionados).pack(side="left", padx=3)
-        ttk.Button(frame_botoes_grid, text="⚡ Edição em Lote", command=self._janela_edicao_lote).pack(side="left", padx=3)
-        ttk.Button(frame_botoes_grid, text="🗑 Excluir Selecionado(s)", command=self._excluir_dado).pack(side="left", padx=3)
-        ttk.Button(frame_botoes_grid, text="📥 Importar Planilha (.xlsx)", command=self._importar_planilha_excel).pack(side="right", padx=3)
+        self._configurar_colunas_grid()
 
+        # Frame do Painel Lateral (Oculto por padrão)
+        self.frame_painel_lateral = ttk.LabelFrame(self.pane_principal, text=" Painel Lateral • Mídia & Coordenadas ", padding=8)
+        self._construir_conteudo_painel_lateral()
+
+        # 4. Rodapé Estatístico e Botões de Ação
         self.frame_stats = tk.Frame(self.container_principal, bg="#e1e7ef", bd=1, relief="solid")
         self.frame_stats.pack(fill="x", padx=10, pady=2)
         self.lbl_estatisticas = tk.Label(
@@ -773,29 +713,135 @@ class AppPesquisaMercado:
         ttk.Button(frame_acoes, text="📊 Exportar Planilha Excel (SISDEA)", style="Accent.TButton", command=self._exportar_excel).pack(side="left", padx=6, expand=True, fill="x")
         ttk.Button(frame_acoes, text="📄 Gerar Relatório Word (Fichas Prontas)", style="Primary.TButton", command=self._iniciar_exportacao_word_thread).pack(side="right", padx=6, expand=True, fill="x")
 
+    def _construir_conteudo_painel_lateral(self):
+        for w in self.frame_painel_lateral.winfo_children():
+            w.destroy()
+
+        ttk.Label(self.frame_painel_lateral, text="Linha Selecionada (D.):", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        self.lbl_lateral_dado = ttk.Label(self.frame_painel_lateral, text="Nenhuma selecionada", foreground="#2b7a78")
+        self.lbl_lateral_dado.pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(self.frame_painel_lateral, text="Foto 1 (Imóvel / Drone):").pack(anchor="w")
+        f1_frame = ttk.Frame(self.frame_painel_lateral)
+        f1_frame.pack(fill="x", pady=2)
+        self.lat_txt_foto1 = ttk.Entry(f1_frame, width=28)
+        self.lat_txt_foto1.pack(side="left", fill="x", expand=True)
+        ttk.Button(f1_frame, text="...", width=4, command=lambda: self._lateral_buscar_foto(self.lat_txt_foto1, "foto1")).pack(side="left", padx=2)
+
+        ttk.Label(self.frame_painel_lateral, text="Foto 2 (Print Anúncio):").pack(anchor="w", pady=(6, 0))
+        f2_frame = ttk.Frame(self.frame_painel_lateral)
+        f2_frame.pack(fill="x", pady=2)
+        self.lat_txt_foto2 = ttk.Entry(f2_frame, width=28)
+        self.lat_txt_foto2.pack(side="left", fill="x", expand=True)
+        ttk.Button(f2_frame, text="...", width=4, command=lambda: self._lateral_buscar_foto(self.lat_txt_foto2, "foto2")).pack(side="left", padx=2)
+
+        ttk.Label(self.frame_painel_lateral, text="Coordenadas UTM:", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 2))
+        
+        z_frame = ttk.Frame(self.frame_painel_lateral)
+        z_frame.pack(fill="x", pady=2)
+        ttk.Label(z_frame, text="Zona:", width=6).pack(side="left")
+        self.lat_txt_zona = ttk.Entry(z_frame, width=10)
+        self.lat_txt_zona.pack(side="left")
+
+        e_frame = ttk.Frame(self.frame_painel_lateral)
+        e_frame.pack(fill="x", pady=2)
+        ttk.Label(e_frame, text="E (m):", width=6).pack(side="left")
+        self.lat_txt_e = ttk.Entry(e_frame, width=18)
+        self.lat_txt_e.pack(side="left")
+
+        s_frame = ttk.Frame(self.frame_painel_lateral)
+        s_frame.pack(fill="x", pady=2)
+        ttk.Label(s_frame, text="S (m):", width=6).pack(side="left")
+        self.lat_txt_s = ttk.Entry(s_frame, width=18)
+        self.lat_txt_s.pack(side="left")
+
+        ttk.Button(self.frame_painel_lateral, text="💾 Salvar Alterações da Mídia", style="Primary.TButton", command=self._lateral_salvar_dados).pack(fill="x", pady=(15, 5))
+        ttk.Button(self.frame_painel_lateral, text="✖ Ocultar Painel", command=self._alternar_painel_lateral).pack(fill="x")
+
+    def _alternar_painel_lateral(self):
+        if self.painel_lateral_visivel:
+            self.pane_principal.forget(self.frame_painel_lateral)
+            self.painel_lateral_visivel = False
+        else:
+            self.pane_principal.add(self.frame_painel_lateral, stretch="never")
+            self.pane_principal.sash_place(0, 880, 0)
+            self.painel_lateral_visivel = True
+            self._atualizar_painel_lateral()
+
+    def _abrir_painel_lateral_selecionado(self):
+        if not self.painel_lateral_visivel:
+            self._alternar_painel_lateral()
+        else:
+            self._atualizar_painel_lateral()
+
+    def _atualizar_painel_lateral(self):
+        if not self.painel_lateral_visivel:
+            return
+        sels = self.tree.selection()
+        if not sels:
+            return
+        vals = self.tree.item(sels[0], "values")
+        if not vals:
+            return
+        d_id = int(vals[0])
+        dado = next((d for d in self.dados_pesquisas if (d.get("dado_id") or d.get("D.")) == d_id), None)
+        if not dado:
+            return
+
+        self._dado_lateral_ativo = dado
+        self.lbl_lateral_dado.config(text=f"Pesquisa D.{d_id} - {dado.get('municipio', '')}")
+        self.lat_txt_foto1.delete(0, tk.END)
+        self.lat_txt_foto1.insert(0, dado.get("foto1", ""))
+        self.lat_txt_foto2.delete(0, tk.END)
+        self.lat_txt_foto2.insert(0, dado.get("foto2", ""))
+        self.lat_txt_zona.delete(0, tk.END)
+        self.lat_txt_zona.insert(0, dado.get("zona_utm", ""))
+        self.lat_txt_e.delete(0, tk.END)
+        self.lat_txt_e.insert(0, dado.get("coord_e", ""))
+        self.lat_txt_s.delete(0, tk.END)
+        self.lat_txt_s.insert(0, dado.get("coord_s", ""))
+
+    def _lateral_buscar_foto(self, entry_widget, campo):
+        caminho = filedialog.askopenfilename(filetypes=[("Imagens", "*.png *.jpg *.jpeg *.webp *.bmp"), ("Todos", "*.*")])
+        if caminho:
+            entry_widget.delete(0, tk.END)
+            entry_widget.insert(0, caminho)
+
+    def _lateral_salvar_dados(self):
+        if not hasattr(self, "_dado_lateral_ativo") or not self._dado_lateral_ativo:
+            return
+        dado = self._dado_lateral_ativo
+        dado["foto1"] = self.lat_txt_foto1.get().strip()
+        dado["foto2"] = self.lat_txt_foto2.get().strip()
+        dado["zona_utm"] = self.lat_txt_zona.get().strip()
+        dado["coord_e"] = limpar_sufixo_coord(self.lat_txt_e.get())
+        dado["coord_s"] = limpar_sufixo_coord(self.lat_txt_s.get())
+        self._recarregar_grid()
+        messagebox.showinfo("Salvo", "Mídia e coordenadas atualizadas para a pesquisa selecionada!")
+
     def _configurar_colunas_grid(self):
         if not hasattr(self, "tree"):
             return
         colunas_base = [
             ("dado_id", "D.", 38, "center"),
             ("utilizado", "☑", 38, "center"),
-            ("informante", "Informante", 130, "w"),
-            ("telefone", "Telefone", 105, "w"),
-            ("endereco", "Endereço", 160, "w"),
-            ("bairro", "Bairro", 110, "w"),
-            ("municipio", "Município", 110, "w"),
-            ("valor_total", "* Valor Total", 105, "e"),
-            ("area_terreno", "Área", 85, "e"),
-            ("unidade", "Un.", 42, "center"),
+            ("informante", "Informante", 120, "w"),
+            ("telefone", "Telefone", 95, "w"),
+            ("endereco", "Endereço", 150, "w"),
+            ("bairro", "Bairro", 100, "w"),
+            ("municipio", "Município", 100, "w"),
+            ("valor_total", "* Valor Total", 100, "e"),
+            ("area_terreno", "Área", 75, "e"),
+            ("unidade", "Un.", 40, "center"),
         ]
         colunas_vars = []
         for v_cfg in self.variaveis_config:
             nome_v = v_cfg["nome"]
-            colunas_vars.append((f"var_{nome_v}", nome_v, 95, "center"))
+            colunas_vars.append((f"var_{nome_v}", nome_v, 90, "center"))
 
         colunas_fim = [
-            ("unitario", "Unitário (R$/un)", 110, "e"),
-            ("status", "Status", 65, "center")
+            ("unitario", "Unitário (R$/un)", 105, "e"),
+            ("status", "Status", 60, "center")
         ]
 
         todas_colunas = colunas_base + colunas_vars + colunas_fim
@@ -808,47 +854,40 @@ class AppPesquisaMercado:
             self.tree.heading(col_id, text=titulo)
             self.tree.column(col_id, width=larg, minwidth=36, anchor=alinhamento, stretch=False)
 
+    def _adicionar_linha_vazia_grade(self):
+        item_id = len(self.dados_pesquisas) + 1
+        un_atual = self.var_unidade.get() if hasattr(self, "var_unidade") else "m²"
+        reg = {
+            "dado_id": item_id,
+            "utilizado": True,
+            "informante": "",
+            "telefone": "",
+            "endereco": "",
+            "bairro": "",
+            "municipio": "",
+            "valor_total": 0.0,
+            "area_terreno": 0.0,
+            "area_construida": 0.0,
+            "unitario": 0.0,
+            "unidade": un_atual,
+            "localizacao": "Rural" if un_atual == "ha" else "Urbana",
+            "zona_utm": "",
+            "coord_e": "",
+            "coord_s": "",
+            "data": data_hoje_br(),
+            "link": "",
+            "foto1": "",
+            "foto2": "",
+            "variaveis_extras": {}
+        }
+        self.dados_pesquisas.append(reg)
+        self._recarregar_grid()
+
     def _atualizar_interface_variaveis(self):
-        if not hasattr(self, "frame_vars"):
-            return
-        for w in self.frame_vars.winfo_children():
-            w.destroy()
-        self.widgets_dinamicos.clear()
-
-        for idx, var in enumerate(self.variaveis_config):
-            col = (idx % 3) * 2
-            row = idx // 3
-
-            lbl = ttk.Label(self.frame_vars, text=f"{var['nome']}:")
-            lbl.grid(row=row, column=col, sticky="w", padx=4, pady=2)
-
-            if var["tipo"] == "codigo" and var.get("opcoes"):
-                cb = ttk.Combobox(self.frame_vars, values=var["opcoes"], width=23, state="readonly")
-                if var["opcoes"]:
-                    cb.set(var["opcoes"][0])
-                cb.grid(row=row, column=col + 1, sticky="w", padx=4, pady=2)
-                cb.bind("<<ComboboxSelected>>", lambda e: self._verificar_calculo_nota_agronomica())
-                self.widgets_dinamicos[var["nome"]] = cb
-            else:
-                ent = ttk.Entry(self.frame_vars, width=25)
-                ent.grid(row=row, column=col + 1, sticky="w", padx=4, pady=2)
-                self.widgets_dinamicos[var["nome"]] = ent
-
-        self._verificar_calculo_nota_agronomica()
+        pass
 
     def _verificar_calculo_nota_agronomica(self):
-        # Constrói dicionário temporário com os widgets atuais para teste flexível
-        vals_temp = {}
-        for nome, w in self.widgets_dinamicos.items():
-            vals_temp[nome] = w.get() if hasattr(w, "get") else ""
-        
-        nota = calcular_nota_agronomica_flexivel(vals_temp)
-        if nota:
-            for nome, w in self.widgets_dinamicos.items():
-                if normalizar_chave_var(nome) == "nota agronômica":
-                    if hasattr(w, "delete") and hasattr(w, "insert"):
-                        w.delete(0, tk.END)
-                        w.insert(0, nota)
+        pass
 
     def _mostrar_tabela_nota_agronomica(self):
         janela = tk.Toplevel(self.root)
@@ -900,13 +939,8 @@ class AppPesquisaMercado:
             messagebox.showwarning("Formato não reconhecido", "Não foi possível localizar Latitude e Longitude decimais no texto informado.")
             return
         zona, e_val, s_val = res
-        self.txt_zona.delete(0, tk.END)
-        self.txt_zona.insert(0, zona)
-        self.txt_coord_e.delete(0, tk.END)
-        self.txt_coord_e.insert(0, e_val)
-        self.txt_coord_s.delete(0, tk.END)
-        self.txt_coord_s.insert(0, s_val)
-        messagebox.showinfo("Coordenadas Convertidas", f"Conversão concluída (SIRGAS 2000 / WGS84):\nZona: {zona}\nCoord. E: {e_val} m\nCoord. S: {s_val} m")
+        self.txt_zona.delete(0, tk.END) if hasattr(self, "txt_zona") else None
+        messagebox.showinfo("Coordenadas Convertidas", f"Conversão concluída (SIRGAS 2000):\nZona: {zona}\nCoord. E: {e_val} m\nCoord. S: {s_val} m\n\n(Aplique na linha ativa ou lote).")
 
     def _janela_config_variaveis(self):
         janela = tk.Toplevel(self.root)
@@ -954,12 +988,12 @@ class AppPesquisaMercado:
                 entradas_vars.append((var_ativa, e_nome, cb_tipo, e_opcoes))
 
         ttk.Button(frame_perfis, text="🏙 Perfil Urbano", command=lambda: recarregar_linhas_editor(copy.deepcopy(DEFAULT_VARS_PADRAO))).pack(side="left", padx=4)
-        ttk.Button(frame_perfis, text="🌾 Perfil Rural (Agronômico)", command=lambda: recarregar_linhas_editor(copy.deepcopy(DEFAULT_VARS_RURAL))).pack(side="left", padx=4)
+        ttk.Button(frame_perfis, text="🌾 Perfil Rural", command=lambda: recarregar_linhas_editor(copy.deepcopy(DEFAULT_VARS_RURAL))).pack(side="left", padx=4)
         ttk.Button(frame_perfis, text="💧 Perfil COPASA", command=lambda: recarregar_linhas_editor(copy.deepcopy(DEFAULT_VARS_COPASA))).pack(side="left", padx=4)
 
         frame_cat = ttk.Frame(janela, padding=(10, 2))
         frame_cat.pack(fill="x")
-        ttk.Label(frame_cat, text="Adicionar variável usual do catálogo:").pack(side="left")
+        ttk.Label(frame_cat, text="Adicionar variável usual:").pack(side="left")
         nomes_cat = [v["nome"] for v in CATALOGO_VARIAVEIS_USUAIS]
         cb_cat = ttk.Combobox(frame_cat, values=nomes_cat, width=25, state="readonly")
         cb_cat.pack(side="left", padx=6)
@@ -980,7 +1014,7 @@ class AppPesquisaMercado:
                 atuais.append(copy.deepcopy(item_cat))
             recarregar_linhas_editor(atuais)
 
-        ttk.Button(frame_cat, text="➕ Incluir Variável", command=adicionar_do_catalogo).pack(side="left")
+        ttk.Button(frame_cat, text="➕ Incluir", command=adicionar_do_catalogo).pack(side="left")
 
         frame_lista = ttk.LabelFrame(janela, text=" 2. Variáveis Ativas no Projeto ", padding=8)
         frame_lista.pack(fill="both", expand=True, padx=10, pady=6)
@@ -999,116 +1033,24 @@ class AppPesquisaMercado:
                     })
             self.variaveis_config = novas
             self._salvar_config_variaveis()
-            self._atualizar_interface_variaveis()
             self._configurar_colunas_grid()
             self._recarregar_grid()
             janela.destroy()
-            messagebox.showinfo("Sucesso", "Variáveis e colunas da grade atualizadas com sucesso!")
+            messagebox.showinfo("Sucesso", "Variáveis atualizadas com sucesso!")
 
         ttk.Button(janela, text="💾 Salvar e Atualizar Grade", style="Primary.TButton", command=salvar).pack(pady=8)
 
     def _buscar_arquivo_foto(self, entry_widget):
-        caminho = filedialog.askopenfilename(
-            filetypes=[
-                ("Imagens", "*.png *.jpg *.jpeg *.webp *.bmp"),
-                ("Todos os arquivos", "*.*")
-            ]
-        )
+        caminho = filedialog.askopenfilename(filetypes=[("Imagens", "*.png *.jpg *.jpeg *.webp *.bmp"), ("Todos", "*.*")])
         if caminho:
             entry_widget.delete(0, tk.END)
             entry_widget.insert(0, caminho)
 
     def _limpar_formulario(self):
-        self.item_em_edicao = None
-        self.var_utilizado.set(True)
-        self.txt_informante.delete(0, tk.END)
-        self.txt_telefone.delete(0, tk.END)
-        self.txt_endereco.delete(0, tk.END)
-        self.txt_bairro.delete(0, tk.END)
-        self.txt_municipio.delete(0, tk.END)
-        self.txt_valor.delete(0, tk.END)
-        self.txt_area.delete(0, tk.END)
-        self.txt_area_const.delete(0, tk.END)
-        self.txt_zona.delete(0, tk.END)
-        self.txt_coord_e.delete(0, tk.END)
-        self.txt_coord_s.delete(0, tk.END)
-        self.txt_data.delete(0, tk.END)
-        self.txt_data.insert(0, data_hoje_br())
-        self.txt_link.delete(0, tk.END)
-        self.txt_foto1.delete(0, tk.END)
-        self.txt_foto2.delete(0, tk.END)
-
-        for _, widget in self.widgets_dinamicos.items():
-            if isinstance(widget, ttk.Combobox):
-                vals = widget.cget("values")
-                if vals:
-                    widget.set(vals[0])
-            else:
-                widget.delete(0, tk.END)
-
-        self._verificar_calculo_nota_agronomica()
-        self.btn_salvar_dado.config(text="➕ Adicionar à Grade")
-        self.btn_cancelar_edicao.config(state="disabled")
+        pass
 
     def _adicionar_ou_salvar_dado(self):
-        try:
-            self._verificar_calculo_nota_agronomica()
-            valor_total = converter_para_float(self.txt_valor.get())
-            area_num = converter_para_float(self.txt_area.get())
-            area_const = converter_para_float(self.txt_area_const.get())
-            unidade = self.var_unidade.get()
-            unitario = valor_total / area_num if area_num > 0 else 0.0
-
-            dado_num = self.item_em_edicao.get("dado_id", self.item_em_edicao.get("D.", 1)) if self.item_em_edicao else (len(self.dados_pesquisas) + 1)
-
-            coord_e = limpar_sufixo_coord(self.txt_coord_e.get())
-            coord_s = limpar_sufixo_coord(self.txt_coord_s.get())
-
-            registro = {
-                "dado_id": int(dado_num),
-                "utilizado": bool(self.var_utilizado.get()),
-                "informante": sanitizar_texto_celula(self.txt_informante.get()),
-                "telefone": sanitizar_texto_celula(self.txt_telefone.get()),
-                "endereco": sanitizar_texto_celula(self.txt_endereco.get()),
-                "bairro": sanitizar_texto_celula(self.txt_bairro.get()),
-                "municipio": sanitizar_texto_celula(self.txt_municipio.get()),
-                "valor_total": valor_total,
-                "area_terreno": area_num,
-                "area_construida": area_const,
-                "unitario": unitario,
-                "unidade": unidade,
-                "localizacao": "Rural" if unidade == "ha" else "Urbana",
-                "zona_utm": self.txt_zona.get().strip(),
-                "coord_e": coord_e,
-                "coord_s": coord_s,
-                "data": self.txt_data.get().strip(),
-                "link": self.txt_link.get().strip(),
-                "foto1": self.txt_foto1.get().strip(),
-                "foto2": self.txt_foto2.get().strip(),
-                "variaveis_extras": {}
-            }
-
-            for nome, widget in self.widgets_dinamicos.items():
-                val = widget.get().strip()
-                registro["variaveis_extras"][nome] = sanitizar_texto_celula(val)
-
-            nota_auto = calcular_nota_agronomica_flexivel(registro["variaveis_extras"])
-            if nota_auto:
-                for k in registro["variaveis_extras"]:
-                    if normalizar_chave_var(k) == "nota agronômica":
-                        registro["variaveis_extras"][k] = nota_auto
-
-            if self.item_em_edicao:
-                idx = next((i for i, d in enumerate(self.dados_pesquisas) if (d.get("dado_id") or d.get("D.")) == dado_num), None)
-                if idx is not None:
-                    self.dados_pesquisas[idx] = registro
-            else:
-                self.dados_pesquisas.append(registro)
-
-            self._recarregar_grid()
-            self._limpar_formulario()
-        except Exception as e:
-            messagebox.showerror("Erro de Preenchimento", f"Verifique os dados numéricos: {e}")
+        self._adicionar_linha_vazia_grade()
 
     def _recarregar_grid(self):
         if not hasattr(self, "tree"):
@@ -1163,6 +1105,7 @@ class AppPesquisaMercado:
             self.tree.insert("", "end", values=valores_linha, tags=(tag,))
 
         self._atualizar_estatisticas_rodape(unitarios_ativos, len(self.dados_pesquisas), un_ref)
+        self._autosave()
 
     def _atualizar_estatisticas_rodape(self, unitarios_ativos, total_geral, unidade):
         if not hasattr(self, "lbl_estatisticas"):
@@ -1179,7 +1122,6 @@ class AppPesquisaMercado:
         desvio = statistics.stdev(unitarios_ativos) if n_ativos > 1 else 0.0
         cv = (desvio / media * 100.0) if media > 0 else 0.0
 
-        # Alerta se houver outliers beyond ±30% da média
         outliers = [u for u in unitarios_ativos if abs(u - media) > 0.30 * media]
         alerta_outlier = f" • ⚠ {len(outliers)} fora de ±30%" if outliers else ""
 
@@ -1226,11 +1168,12 @@ class AppPesquisaMercado:
 
         valor_atual = valores[col_idx]
         self.celula_ativa = {"dado_id": dado_id, "campo": chave_col, "rotulo": titulo_col}
-        self.lbl_celula_sisdea.config(text=f"{titulo_col} / {dado_id}")
+        self.lbl_celula_sisdea.config(text=f"fx [{titulo_col} · D.{dado_id}]")
         self.txt_barra_sisdea.delete(0, tk.END)
         self.txt_barra_sisdea.insert(0, str(valor_atual))
         self.txt_barra_sisdea.focus_set()
         self.txt_barra_sisdea.select_range(0, tk.END)
+        self._atualizar_painel_lateral()
 
     def _confirmar_edicao_barra_sisdea(self):
         d_id = self.celula_ativa.get("dado_id")
@@ -1409,7 +1352,7 @@ class AppPesquisaMercado:
                     "zona_utm": "",
                     "coord_e": "",
                     "coord_s": "",
-                    "data": self.txt_data.get().strip() or data_hoje_br(),
+                    "data": data_hoje_br(),
                     "link": "",
                     "foto1": "",
                     "foto2": "",
@@ -1433,6 +1376,62 @@ class AppPesquisaMercado:
                 self.dados_pesquisas.extend(novos)
                 self._recarregar_grid()
                 messagebox.showinfo("Colagem Concluída", f"{len(novos)} pesquisas coladas diretamente na grade!")
+
+    def _excluir_dado(self):
+        sels = self.tree.selection()
+        if not sels:
+            messagebox.showwarning("Aviso", "Selecione uma ou mais pesquisas para excluir.")
+            return
+
+        ids_excluir = [int(self.tree.item(s, "values")[0]) for s in sels]
+        if messagebox.askyesno("Confirmar Exclusão", f"Deseja excluir {len(ids_excluir)} pesquisa(s) selecionada(s)?"):
+            self.dados_pesquisas = [d for d in self.dados_pesquisas if (d.get("dado_id") or d.get("D.")) not in ids_excluir]
+            for i, d in enumerate(self.dados_pesquisas):
+                d["dado_id"] = i + 1
+            self._recarregar_grid()
+
+    def _salvar_projeto(self):
+        caminho = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Projeto de Pesquisa", "*.json")])
+        if not caminho:
+            return
+        dados_salvar = {
+            "modelo": self.modelo_ativo,
+            "variaveis_config": self.variaveis_config,
+            "pesquisas": self.dados_pesquisas
+        }
+        try:
+            with open(caminho, "w", encoding="utf-8") as f:
+                json.dump(dados_salvar, f, ensure_ascii=False, indent=4)
+            messagebox.showinfo("Sucesso", "Projeto salvo com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao salvar arquivo: {e}")
+
+    def _executar_abertura_json(self):
+        caminho = filedialog.askopenfilename(filetypes=[("Projeto de Pesquisa", "*.json")])
+        if not caminho:
+            return False
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                conteudo = json.load(f)
+            self.modelo_ativo = conteudo.get("modelo", "PADRAO")
+            self.variaveis_config = conteudo.get("variaveis_config") or copy.deepcopy(DEFAULT_VARS_PADRAO)
+            
+            raw_pesquisas = conteudo.get("pesquisas", [])
+            self.dados_pesquisas = [normalizar_dado(d) for d in raw_pesquisas]
+            self._unidade_padrao_inicial = "ha" if self.modelo_ativo == "PADRAO" and any(d.get("unidade") == "ha" for d in self.dados_pesquisas) else "m²"
+
+            if hasattr(self, "tree"):
+                self._configurar_colunas_grid()
+                self._recarregar_grid()
+                messagebox.showinfo("Sucesso", f"{len(self.dados_pesquisas)} pesquisas carregadas com sucesso!")
+
+            return True
+        except Exception as e:
+            messagebox.showerror("Erro ao Abrir", f"Arquivo corrompido ou formato inválido: {e}")
+            return False
+
+    def _abrir_projeto_menu(self):
+        self._executar_abertura_json()
 
     def _importar_planilha_excel(self):
         caminho = filedialog.askopenfilename(filetypes=[("Planilhas Excel", "*.xlsx *.xls")])
@@ -1511,7 +1510,7 @@ class AppPesquisaMercado:
             elif unidade_detectada_coluna:
                 unidade = unidade_detectada_coluna
             else:
-                unidade = self.var_unidade.get() if hasattr(self, "var_unidade") else "m²"
+                unidade = getattr(self, "_unidade_padrao_inicial", "m²")
 
             utilizado_flag = True
             if "utilizado" in mapeamento and not pd.isna(row.get(mapeamento["utilizado"])):
@@ -1520,6 +1519,12 @@ class AppPesquisaMercado:
 
             u_calc = v_total / a_terr if a_terr > 0 else 0.0
             item_id = len(self.dados_pesquisas) + len(novos_dados) + 1
+
+            val_data = row.get(mapeamento.get("data", ""), None)
+            if pd.isna(val_data) or not str(val_data).strip():
+                str_data = data_hoje_br()
+            else:
+                str_data = sanitizar_texto_celula(val_data)
 
             registro = {
                 "dado_id": item_id,
@@ -1538,14 +1543,13 @@ class AppPesquisaMercado:
                 "zona_utm": sanitizar_texto_celula(row.get(mapeamento.get("zona_utm", ""), "")),
                 "coord_e": limpar_sufixo_coord(sanitizar_texto_celula(row.get(mapeamento.get("coord_e", ""), ""))),
                 "coord_s": limpar_sufixo_coord(sanitizar_texto_celula(row.get(mapeamento.get("coord_s", ""), ""))),
-                "data": sanitizar_texto_celula(row.get(mapeamento.get("data", data_hoje_br()), data_hoje_br())),
+                "data": str_data,
                 "link": sanitizar_texto_celula(row.get(mapeamento.get("link", ""), "")),
                 "foto1": "",
                 "foto2": "",
                 "variaveis_extras": {}
             }
 
-            # Evita que colunas mapeadas acima colidam com variáveis extras
             nomes_colunas_fixas = {"informante", "telefone", "endereço", "endereco", "bairro", "município", "municipio", "valor total", "área construída", "area construida", "área terreno", "area terreno", "coord. e", "coord. s", "zona", "data", "link", "unidade", "utilizado"}
 
             for v_cfg in self.variaveis_config:
