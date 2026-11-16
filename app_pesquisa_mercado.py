@@ -160,7 +160,6 @@ def converter_latlon_para_utm(texto_coord):
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return None
 
-    # Elipsoide GRS80 (SIRGAS 2000) / WGS84
     a = 6378137.0
     f = 1 / 298.257222101
     k0 = 0.9996
@@ -1763,7 +1762,7 @@ class AppPesquisaMercado:
 
     def _iniciar_exportacao_word_thread(self):
         if not self.dados_pesquisas:
-            messagebox.showwarning("Aviso", "Nenhum dado cadastrado para exportação.")
+            messagebox.showwarning("Aviso", "Nenhum dado cadastrado para exportar.")
             return
 
         caminho = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Documento Word", "*.docx")])
