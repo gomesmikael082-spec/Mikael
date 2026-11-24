@@ -10,10 +10,12 @@ import threading
 import copy
 import statistics
 from datetime import datetime
+from urllib.parse import urlparse
 import requests
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import pandas as pd
+from openpyxl.styles import Font, PatternFill, Alignment
 from PIL import Image, ImageOps, ImageTk, ImageGrab
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
@@ -41,6 +43,7 @@ AUTOSAVE_FILE = os.path.join(CONFIG_DIR, "autosave_projeto.json")
 ANEXOS_TEMP_DIR = os.path.join(CONFIG_DIR, "anexos_temp")
 os.makedirs(ANEXOS_TEMP_DIR, exist_ok=True)
 
+MAX_DOWNLOAD_IMAGEM_BYTES = 10 * 1024 * 1024  # 10 MB
 LANCZOS_FILTER = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
 
 SUC_TCPR  = ["w:shd", "w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText", "w:vAlign", "w:hideMark"]
@@ -128,6 +131,12 @@ DEFAULT_CAMPOS_OPCIONAIS = {
     "localizacao": True
 }
 
+DEFAULT_CONFIG_WORD = {
+    "titulo_padrao": "PESQUISA DE MERCADO - MEMÓRIA DE CÁLCULO",
+    "contrato_copasa": "CONTRATO: COPASA I",
+    "rodape": ""
+}
+
 
 def data_hoje_br():
     return datetime.now().strftime("%d/%m/%Y")
@@ -135,6 +144,52 @@ def data_hoje_br():
 
 def normalizar_chave_var(nome):
     return re.sub(r"\s+", " ", str(nome).strip().lower())
+
+
+def normalizar_unidade(un_str, padrao="m²"):
+    s = sanitizar_texto_celula(un_str).lower()
+    if "ha" in s or "hectare" in s:
+        return "ha"
+    if "m" in s:
+        return "m²"
+    return padrao
+
+
+def converter_area(valor, unidade_origem, unidade_destino):
+    """Converte área numericamente entre m² e ha (1 ha = 10.000 m²) preservando precisão."""
+    try:
+        val = float(valor)
+    except (TypeError, ValueError):
+        return 0.0
+    if val <= 0:
+        return 0.0
+    orig = normalizar_unidade(unidade_origem)
+    dest = normalizar_unidade(unidade_destino)
+    if orig == dest:
+        return val
+    if orig == "m²" and dest == "ha":
+        return round(val / 10000.0, 6)
+    if orig == "ha" and dest == "m²":
+        return round(val * 10000.0, 4)
+    return val
+
+
+def salvar_json_atomico(caminho, dados, criar_backup=False):
+    """Grava JSON em arquivo temporário, sincroniza no disco, cria backup opcional e substitui atomicamente."""
+    dir_dest = os.path.dirname(os.path.abspath(caminho))
+    os.makedirs(dir_dest, exist_ok=True)
+    tmp_path = f"{caminho}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(dados, f, ensure_ascii=False, indent=4)
+        f.flush()
+        os.fsync(f.fileno())
+    if criar_backup and os.path.exists(caminho):
+        bak_path = f"{caminho}.bak"
+        try:
+            shutil.copy2(caminho, bak_path)
+        except Exception as e:
+            logging.warning(f"Não foi possível criar backup '{bak_path}': {e}")
+    os.replace(tmp_path, caminho)
 
 
 def sanitizar_texto_celula(txt):
@@ -237,15 +292,18 @@ def extrair_dados_anuncio(texto):
     return res
 
 
-def converter_para_float(texto, permitir_milhar_ponto=True):
+def converter_para_float_validado(texto, permitir_milhar_ponto=True):
+    """Retorna (valor_float, valido_bool), diferenciando entrada vazia/zero de texto inválido."""
     if texto is None:
-        return 0.0
+        return 0.0, True
     if isinstance(texto, (int, float)):
         val_f = float(texto)
-        return 0.0 if math.isnan(val_f) else val_f
+        if math.isnan(val_f) or math.isinf(val_f):
+            return 0.0, False
+        return val_f, True
     s = str(texto).replace("R$", "").replace("m²", "").replace("ha", "").strip()
     if not s or s.lower() in ("nan", "nat", "none"):
-        return 0.0
+        return 0.0, True
     if "." in s and "," in s:
         s = s.replace(".", "").replace(",", ".")
     elif "," in s:
@@ -257,9 +315,14 @@ def converter_para_float(texto, permitir_milhar_ponto=True):
         elif permitir_milhar_ponto and len(partes) == 2 and len(partes[1]) == 3 and len(partes[0]) <= 3 and int(partes[0] or 0) > 0:
             s = s.replace(".", "")
     try:
-        return float(s)
+        return float(s), True
     except ValueError:
-        return 0.0
+        return 0.0, False
+
+
+def converter_para_float(texto, permitir_milhar_ponto=True):
+    val, _ = converter_para_float_validado(texto, permitir_milhar_ponto=permitir_milhar_ponto)
+    return val
 
 
 def formatar_moeda_br(valor):
@@ -283,6 +346,53 @@ def limpar_sufixo_coord(coord_str):
     return re.sub(r'\s*m\s*$', '', s, flags=re.IGNORECASE).strip()
 
 
+def calcular_percentil(valores_ordenados, p):
+    """Interpolação linear padrão para quartis (0 <= p <= 100)."""
+    n = len(valores_ordenados)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return valores_ordenados[0]
+    k = (n - 1) * (p / 100.0)
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return valores_ordenados[int(k)]
+    return valores_ordenados[f] + (k - f) * (valores_ordenados[c] - valores_ordenados[f])
+
+
+def calcular_estatisticas_completas(valores):
+    if not valores:
+        return None
+    ord_v = sorted(valores)
+    n = len(ord_v)
+    media = statistics.mean(ord_v)
+    mediana = statistics.median(ord_v)
+    dp = statistics.stdev(ord_v) if n > 1 else 0.0
+    cv = (dp / media * 100.0) if media > 0 else 0.0
+    q1 = calcular_percentil(ord_v, 25)
+    q2 = calcular_percentil(ord_v, 50)
+    q3 = calcular_percentil(ord_v, 75)
+    iqr = q3 - q1
+    return {
+        "n": n,
+        "minimo": ord_v[0],
+        "maximo": ord_v[-1],
+        "media": media,
+        "mediana": mediana,
+        "dp": dp,
+        "cv": cv,
+        "q1": q1,
+        "q2": q2,
+        "q3": q3,
+        "iqr": iqr,
+        "lim_inf_iqr": q1 - 1.5 * iqr,
+        "lim_sup_iqr": q3 + 1.5 * iqr,
+        "lim_inf_30": media * 0.70,
+        "lim_sup_30": media * 1.30,
+    }
+
+
 def redimensionar_e_corrigir_imagem(caminho_ou_stream, max_largura=1200, max_altura=850):
     try:
         if isinstance(caminho_ou_stream, io.BytesIO):
@@ -304,6 +414,14 @@ def redimensionar_e_corrigir_imagem(caminho_ou_stream, max_largura=1200, max_alt
         return None
 
 
+def validar_url_http(url):
+    try:
+        parsed = urlparse(url)
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
 def normalizar_url_gdrive(url):
     if not url:
         return ""
@@ -318,7 +436,7 @@ def normalizar_dado(dado, variaveis_config=None, unidade_padrao="m²"):
     if isinstance(utilizado, str):
         utilizado = utilizado.strip().lower() not in ("false", "0", "não", "nao", "☐", "não utilizado no modelo")
 
-    unidade = sanitizar_texto_celula(dado.get("unidade") or dado.get("Unidade") or unidade_padrao) or unidade_padrao
+    unidade = normalizar_unidade(dado.get("unidade") or dado.get("Unidade") or unidade_padrao, padrao=unidade_padrao)
     v_tot = dado.get("valor_total")
     if v_tot is None:
         v_tot = dado.get("Valor Total (R$)") or dado.get("Valor do Aluguel (R$)") or 0.0
@@ -363,19 +481,21 @@ def normalizar_dado(dado, variaveis_config=None, unidade_padrao="m²"):
 class AppPesquisaMercado:
     def __init__(self, root):
         self.root = root
-        self.root.title("ENPROL - Sistema de Pesquisa de Mercado v6.6 (Planilha SISDEA)")
-        self.root.geometry("1320x840")
-        self.root.minsize(1060, 700)
+        self.root.title("ENPROL - Sistema de Pesquisa de Mercado v6.7 (Planilha SISDEA)")
+        self.root.geometry("1340x850")
+        self.root.minsize(1080, 700)
         self._configurar_estilos()
 
         self.modelo_ativo = "PADRAO"
         self.finalidade_ativa = "VENDA"
         self.unidade_padrao_projeto = "m²"
         self.destacar_outliers = True
+        self.criterio_outlier = "30%"  # "30%" ou "IQR"
         self.dados_pesquisas = []
         self.catalogo_variaveis = self._carregar_catalogo_variaveis()
         self.variaveis_config = self._carregar_config_variaveis()
         self.campos_opcionais = copy.deepcopy(DEFAULT_CAMPOS_OPCIONAIS)
+        self.config_word = copy.deepcopy(DEFAULT_CONFIG_WORD)
         self.perfis_usuario = self._carregar_perfis_usuario()
         self.caminho_projeto_atual = None
         self.alteracoes_pendentes = False
@@ -464,8 +584,7 @@ class AppPesquisaMercado:
 
     def _salvar_catalogo_variaveis(self):
         try:
-            with open(CATALOGO_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.catalogo_variaveis, f, ensure_ascii=False, indent=4)
+            salvar_json_atomico(CATALOGO_FILE, self.catalogo_variaveis)
         except Exception as e:
             logging.warning(f"Erro ao salvar catálogo: {e}")
 
@@ -493,14 +612,13 @@ class AppPesquisaMercado:
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"Erro ao carregar config de variáveis: {e}")
         return copy.deepcopy(DEFAULT_VARS_PADRAO)
 
     def _salvar_config_variaveis(self):
         try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.variaveis_config, f, ensure_ascii=False, indent=4)
+            salvar_json_atomico(CONFIG_FILE, self.variaveis_config)
         except Exception as e:
             messagebox.showerror("Erro ao salvar variáveis", str(e))
 
@@ -509,32 +627,39 @@ class AppPesquisaMercado:
             try:
                 with open(PERFIS_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"Erro ao carregar perfis: {e}")
         return {}
 
     def _salvar_perfis_usuario(self):
         try:
-            with open(PERFIS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.perfis_usuario, f, ensure_ascii=False, indent=4)
+            salvar_json_atomico(PERFIS_FILE, self.perfis_usuario)
         except Exception as e:
             messagebox.showerror("Erro ao salvar perfis", str(e))
 
     def _autosave(self):
+        """Gravação atômica do autosave com limpeza automática quando não há dados."""
         if not self.dados_pesquisas:
+            if os.path.exists(AUTOSAVE_FILE):
+                try:
+                    os.remove(AUTOSAVE_FILE)
+                    logging.info("Autosave limpo (projeto sem registros).")
+                except Exception as e:
+                    logging.error(f"Falha ao limpar autosave antigo: {e}")
             return
         try:
-            with open(AUTOSAVE_FILE, "w", encoding="utf-8") as f:
-                json.dump({
-                    "modelo": self.modelo_ativo,
-                    "finalidade": self.finalidade_ativa,
-                    "unidade_padrao": self.unidade_padrao_projeto,
-                    "campos_opcionais": self.campos_opcionais,
-                    "variaveis_config": self.variaveis_config,
-                    "pesquisas": self.dados_pesquisas
-                }, f, ensure_ascii=False, indent=4)
-        except Exception:
-            pass
+            payload = {
+                "modelo": self.modelo_ativo,
+                "finalidade": self.finalidade_ativa,
+                "unidade_padrao": self.unidade_padrao_projeto,
+                "campos_opcionais": self.campos_opcionais,
+                "config_word": self.config_word,
+                "variaveis_config": self.variaveis_config,
+                "pesquisas": self.dados_pesquisas
+            }
+            salvar_json_atomico(AUTOSAVE_FILE, payload, criar_backup=False)
+        except Exception as e:
+            logging.error(f"Erro ao gravar autosave: {e}")
 
     def _ao_fechar_janela(self):
         self._commit_editor_ativo()
@@ -555,7 +680,8 @@ class AppPesquisaMercado:
             return
         mod = "Modelo 1: Padrão" if self.modelo_ativo == "PADRAO" else "Modelo 2: COPASA"
         fin = "Aluguel" if self.finalidade_ativa == "ALUGUEL" else "Venda"
-        self.lbl_info_mod.config(text=f"  |  {mod} • {fin} ({self.unidade_padrao_projeto})")
+        pend = " • *" if self.alteracoes_pendentes else ""
+        self.lbl_info_mod.config(text=f"  |  {mod} • {fin} ({self.unidade_padrao_projeto}){pend}")
 
     # --- HUB INICIAL ---
     def _exibir_tela_hub(self):
@@ -564,15 +690,15 @@ class AppPesquisaMercado:
         frame_hub = ttk.Frame(self.container_principal, padding=40)
         frame_hub.place(relx=0.5, rely=0.5, anchor="center")
 
-        ttk.Label(frame_hub, text="SISTEMA DE PESQUISA DE MERCADO v6.6", font=("Segoe UI", 18, "bold"), foreground="#1f3c5b").pack(pady=(0, 5))
-        ttk.Label(frame_hub, text="Grade Planilha SISDEA • Catálogo Persistente • Venda & Locação", font=("Segoe UI", 10), foreground="#555555").pack(pady=(0, 30))
+        ttk.Label(frame_hub, text="SISTEMA DE PESQUISA DE MERCADO v6.7", font=("Segoe UI", 18, "bold"), foreground="#1f3c5b").pack(pady=(0, 5))
+        ttk.Label(frame_hub, text="Grade Planilha SISDEA • Conversão Real m²/ha • Estatística & Boxplot", font=("Segoe UI", 10), foreground="#555555").pack(pady=(0, 30))
 
-        ttk.Button(frame_hub, text="📄  Criar Novo Arquivo / Projeto", style="Hub.TButton", width=42, command=self._popup_escolha_modelo).pack(pady=7)
-        ttk.Button(frame_hub, text="📂  Carregar Projeto Existente (.json)", style="Hub.TButton", width=42, command=self._abrir_projeto_hub).pack(pady=7)
-        ttk.Button(frame_hub, text="📥  Importar Dados de Planilha (.xlsx)", style="Hub.TButton", width=42, command=self._importar_planilha_hub).pack(pady=7)
+        ttk.Button(frame_hub, text="📄  Criar Novo Arquivo / Projeto", style="Hub.TButton", width=44, command=self._popup_escolha_modelo).pack(pady=7)
+        ttk.Button(frame_hub, text="📂  Carregar Projeto Existente (.json)", style="Hub.TButton", width=44, command=self._abrir_projeto_hub).pack(pady=7)
+        ttk.Button(frame_hub, text="📥  Importar Dados de Planilha (.xlsx)", style="Hub.TButton", width=44, command=self._importar_planilha_hub).pack(pady=7)
         if os.path.exists(AUTOSAVE_FILE):
-            ttk.Button(frame_hub, text="🔄  Recuperar Sessão Anterior (Autosave)", style="Accent.TButton", width=42, command=self._carregar_autosave).pack(pady=7)
-        ttk.Button(frame_hub, text="🚪  Sair do Sistema", width=42, command=self._ao_fechar_janela).pack(pady=(20, 0))
+            ttk.Button(frame_hub, text="🔄  Recuperar Sessão Anterior (Autosave)", style="Accent.TButton", width=44, command=self._carregar_autosave).pack(pady=7)
+        ttk.Button(frame_hub, text="🚪  Sair do Sistema", width=44, command=self._ao_fechar_janela).pack(pady=(20, 0))
 
     def _carregar_autosave(self):
         try:
@@ -620,6 +746,7 @@ class AppPesquisaMercado:
             escolha = var_mod.get()
             self.finalidade_ativa = var_fin.get()
             self.campos_opcionais = copy.deepcopy(DEFAULT_CAMPOS_OPCIONAIS)
+            self.config_word = copy.deepcopy(DEFAULT_CONFIG_WORD)
             if escolha == "COPASA":
                 self.modelo_ativo, self.variaveis_config, self.unidade_padrao_projeto = "COPASA", copy.deepcopy(DEFAULT_VARS_COPASA), "m²"
             elif escolha == "PADRAO_RURAL":
@@ -629,7 +756,7 @@ class AppPesquisaMercado:
                 self.modelo_ativo = p.get("modelo", "PADRAO")
                 self.finalidade_ativa = p.get("finalidade", self.finalidade_ativa)
                 self.variaveis_config = copy.deepcopy(p.get("variaveis_config", DEFAULT_VARS_PADRAO))
-                self.unidade_padrao_projeto = p.get("unidade_padrao", "m²")
+                self.unidade_padrao_projeto = normalizar_unidade(p.get("unidade_padrao", "m²"))
                 self.campos_opcionais = copy.deepcopy(p.get("campos_opcionais", DEFAULT_CAMPOS_OPCIONAIS))
             else:
                 self.modelo_ativo, self.variaveis_config, self.unidade_padrao_projeto = "PADRAO", copy.deepcopy(DEFAULT_VARS_PADRAO), "m²"
@@ -638,6 +765,7 @@ class AppPesquisaMercado:
             self.caminho_projeto_atual = None
             self.alteracoes_pendentes = False
             self.dados_pesquisas = []
+            self._autosave()
             janela.destroy()
             self._exibir_tela_trabalho()
             if callback_pos_confirmacao:
@@ -675,14 +803,15 @@ class AppPesquisaMercado:
 
         m_cfg = tk.Menu(menubar, tearoff=0)
         m_cfg.add_command(label="⚙ Gerenciar Variáveis e Catálogo...", command=self._janela_config_variaveis)
-        m_cfg.add_command(label="👁 Campos, Modelo e Venda/Aluguel...", command=self._janela_campos_opcionais)
+        m_cfg.add_command(label="👁 Campos, Modelo, Word e Venda/Aluguel...", command=self._janela_campos_opcionais)
         m_cfg.add_command(label="💾 Salvar Configuração Atual como Novo Perfil...", command=self._salvar_como_novo_perfil)
         m_cfg.add_separator()
         m_cfg.add_command(label="Aplicar Perfil Urbano Padrão", command=lambda: self._aplicar_perfil_rapido("URBANO"))
         m_cfg.add_command(label="Aplicar Perfil Rural (Nota Agronômica)", command=lambda: self._aplicar_perfil_rapido("RURAL"))
         m_cfg.add_command(label="Aplicar Perfil COPASA", command=lambda: self._aplicar_perfil_rapido("COPASA"))
         m_cfg.add_separator()
-        m_cfg.add_command(label="📊 Ver Tabela 02 - Nota Agronômica", command=self._mostrar_tabela_nota_agronomica)
+        m_cfg.add_command(label="📊 Análise Estatística & Boxplot...", command=self._janela_analise_estatistica)
+        m_cfg.add_command(label="📋 Ver Tabela 02 - Nota Agronômica", command=self._mostrar_tabela_nota_agronomica)
         menubar.add_cascade(label="Variáveis e Perfis", menu=m_cfg)
         self.root.config(menu=menubar)
 
@@ -695,7 +824,7 @@ class AppPesquisaMercado:
         ttk.Button(toolbar, text="📥 Importar Excel", command=self._importar_planilha_excel).pack(side="left", padx=2)
         ttk.Button(toolbar, text="💾 Salvar", command=self._salvar_projeto).pack(side="left", padx=2)
         ttk.Button(toolbar, text="⚙ Variáveis", command=self._janela_config_variaveis).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="👁 Campos", command=self._janela_campos_opcionais).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="👁 Campos / Word", command=self._janela_campos_opcionais).pack(side="left", padx=2)
         ttk.Button(toolbar, text="🔄 Padronizar Unid.", command=self._padronizar_unidades_clique).pack(side="left", padx=2)
 
         ttk.Button(toolbar, text="📄 Gerar Word", style="Primary.TButton", command=self._iniciar_exportacao_word_thread).pack(side="right", padx=2)
@@ -761,12 +890,20 @@ class AppPesquisaMercado:
 
         frame_rodape_btns = tk.Frame(frame_rodape, bg="#e1e7ef")
         frame_rodape_btns.pack(side="right", padx=6, pady=2)
+
         self.var_destaque_out = tk.BooleanVar(value=self.destacar_outliers)
         tk.Checkbutton(
-            frame_rodape_btns, text="Destacar ±30%", variable=self.var_destaque_out,
+            frame_rodape_btns, text="Destacar", variable=self.var_destaque_out,
             bg="#e1e7ef", activebackground="#e1e7ef", font=("Segoe UI", 8), command=self._alternar_destaque_outliers
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(frame_rodape_btns, text="🧹 Desativar Outliers (>±30%)", command=self._desativar_outliers_30).pack(side="left", padx=2)
+        ).pack(side="left", padx=(0, 2))
+
+        self.var_criterio_out = tk.StringVar(value=self.criterio_outlier)
+        cb_crit = ttk.Combobox(frame_rodape_btns, textvariable=self.var_criterio_out, values=["30%", "IQR"], width=5, state="readonly")
+        cb_crit.pack(side="left", padx=(0, 6))
+        cb_crit.bind("<<ComboboxSelected>>", lambda e: self._alternar_criterio_outlier())
+
+        ttk.Button(frame_rodape_btns, text="📈 Boxplot / Estat.", command=self._janela_analise_estatistica).pack(side="left", padx=2)
+        ttk.Button(frame_rodape_btns, text="🧹 Saneamento", command=self._desativar_outliers_criterio).pack(side="left", padx=2)
         ttk.Button(frame_rodape_btns, text="📋 Copiar p/ SISDEA", command=self._copiar_tabela_sisdea).pack(side="left", padx=2)
 
     def _menu_adicionar_dados(self):
@@ -785,35 +922,68 @@ class AppPesquisaMercado:
         for _ in range(qtd):
             self._criar_registro_vazio(herdar_anterior=True)
         self.alteracoes_pendentes = True
+        self._atualizar_rotulo_topo()
         self._reconstruir_planilha()
         self._autosave()
 
     def _padronizar_unidades_clique(self):
+        """Padroniza a unidade de todas as linhas com conversão real de área (1 ha = 10.000 m²)."""
         self._commit_editor_ativo()
         alvo = "ha" if self.unidade_padrao_projeto == "m²" else "m²"
         if not self.dados_pesquisas:
             self.unidade_padrao_projeto = alvo
+            self.alteracoes_pendentes = True
             self._atualizar_rotulo_topo()
             messagebox.showinfo("Unidade Padrão", f"Unidade padrão alterada para: {alvo}")
             return
-        resp = messagebox.askyesnocancel(
-            "Padronizar Unidade",
-            f"Qual unidade deseja aplicar em TODAS as {len(self.dados_pesquisas)} linhas?\n\n"
-            f"• Sim = '{alvo}' em todas\n• Não = '{self.unidade_padrao_projeto}' em todas\n• Cancelar = Voltar"
-        )
-        if resp is None:
-            return
-        un_esc = alvo if resp is True else self.unidade_padrao_projeto
-        self.unidade_padrao_projeto = un_esc
-        for d in self.dados_pesquisas:
-            d["unidade"] = un_esc
-            d["localizacao"] = "Rural" if un_esc == "ha" else "Urbana"
-            a_ter = converter_para_float(d.get("area_terreno", 0.0), permitir_milhar_ponto=(un_esc != "ha"))
-            d["unitario"] = converter_para_float(d.get("valor_total", 0.0)) / a_ter if a_ter > 0 else 0.0
-        self.alteracoes_pendentes = True
-        self._atualizar_rotulo_topo()
-        self._reconstruir_planilha()
-        self._autosave()
+
+        janela = tk.Toplevel(self.root)
+        janela.title("Padronizar e Converter Unidades")
+        janela.geometry("440x230")
+        janela.resizable(False, False)
+        janela.transient(self.root)
+        janela.grab_set()
+
+        ttk.Label(janela, text=f"Padronizar todas as {len(self.dados_pesquisas)} linhas para:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=20, pady=(14, 8))
+        var_un = tk.StringVar(value=alvo)
+        ttk.Radiobutton(janela, text="Hectares (ha) — 1 ha = 10.000 m²", value="ha", variable=var_un).pack(anchor="w", padx=30, pady=3)
+        ttk.Radiobutton(janela, text="Metros Quadrados (m²) — 1 m² = 0,0001 ha", value="m²", variable=var_un).pack(anchor="w", padx=30, pady=3)
+
+        var_conv = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            janela,
+            text="Converter automaticamente os valores numéricos de área\n(Ex: 50.000 m² → 5,0000 ha)",
+            variable=var_conv
+        ).pack(anchor="w", padx=25, pady=(12, 10))
+
+        def aplicar():
+            un_esc = var_un.get()
+            fazer_conv = var_conv.get()
+            self.unidade_padrao_projeto = un_esc
+            convertidos = 0
+            for d in self.dados_pesquisas:
+                un_antiga = normalizar_unidade(d.get("unidade", self.unidade_padrao_projeto))
+                a_ter = converter_para_float(d.get("area_terreno", 0.0), permitir_milhar_ponto=(un_antiga != "ha"))
+                if fazer_conv and un_antiga != un_esc and a_ter > 0:
+                    a_ter = converter_area(a_ter, un_antiga, un_esc)
+                    convertidos += 1
+                d["unidade"] = un_esc
+                d["area_terreno"] = a_ter
+                d["localizacao"] = "Rural" if un_esc == "ha" else "Urbana"
+                v_tot = converter_para_float(d.get("valor_total", 0.0))
+                d["unitario"] = v_tot / a_ter if a_ter > 0 else 0.0
+
+            self.alteracoes_pendentes = True
+            self._atualizar_rotulo_topo()
+            self._reconstruir_planilha()
+            self._autosave()
+            janela.destroy()
+            msg = f"Todas as linhas foram padronizadas para '{un_esc}'."
+            if fazer_conv:
+                msg += f"\n{convertidos} área(s) foram convertidas numericamente."
+            messagebox.showinfo("Padronização Concluída", msg)
+
+        ttk.Button(janela, text="✔ Aplicar Padronização", style="Primary.TButton", command=aplicar).pack(pady=4)
 
     def _commit_editor_ativo(self):
         if not hasattr(self, "sheet"):
@@ -835,6 +1005,9 @@ class AppPesquisaMercado:
         for r_idx, linha in enumerate(matriz):
             dado = self.dados_pesquisas[r_idx]
             dado["dado_id"] = r_idx + 1
+            un_anterior = normalizar_unidade(dado.get("unidade", self.unidade_padrao_projeto))
+            un_nova = un_anterior
+
             for c_idx, (chave, _, _) in enumerate(self.esquema_colunas):
                 if c_idx >= len(linha) or chave in ("dado_id", "unitario", "status"):
                     continue
@@ -842,20 +1015,19 @@ class AppPesquisaMercado:
                 if chave == "utilizado":
                     dado["utilizado"] = bool(val) if isinstance(val, bool) else str(val).strip().lower() not in ("false", "0", "não", "nao", "")
                 elif chave == "unidade":
-                    s_un = sanitizar_texto_celula(val).lower()
-                    if "ha" in s_un:
-                        dado["unidade"], dado["localizacao"] = "ha", "Rural"
-                    elif "m" in s_un:
-                        dado["unidade"], dado["localizacao"] = "m²", "Urbana"
-                    else:
-                        dado["unidade"] = dado.get("unidade") or self.unidade_padrao_projeto
+                    un_nova = normalizar_unidade(val, padrao=un_anterior)
                 elif chave == "valor_total":
-                    dado["valor_total"] = converter_para_float(val)
+                    v_num, ok = converter_para_float_validado(val)
+                    if ok:
+                        dado["valor_total"] = v_num
                 elif chave == "area_terreno":
-                    un = dado.get("unidade", self.unidade_padrao_projeto)
-                    dado["area_terreno"] = converter_para_float(val, permitir_milhar_ponto=(un != "ha"))
+                    a_num, ok = converter_para_float_validado(val, permitir_milhar_ponto=(un_anterior != "ha"))
+                    if ok:
+                        dado["area_terreno"] = a_num
                 elif chave == "area_construida":
-                    dado["area_construida"] = converter_para_float(val)
+                    ac_num, ok = converter_para_float_validado(val)
+                    if ok:
+                        dado["area_construida"] = ac_num
                 elif chave == "telefone":
                     dado["telefone"] = sanitizar_telefone(val)
                 elif chave in ("coord_e", "coord_s"):
@@ -864,9 +1036,24 @@ class AppPesquisaMercado:
                     dado.setdefault("variaveis_extras", {})[chave[4:]] = sanitizar_texto_celula(val)
                 else:
                     dado[chave] = sanitizar_texto_celula(val)
+
+            if un_nova != un_anterior:
+                if dado.get("area_terreno", 0.0) > 0:
+                    dado["area_terreno"] = converter_area(dado["area_terreno"], un_anterior, un_nova)
+                dado["unidade"] = un_nova
+                dado["localizacao"] = "Rural" if un_nova == "ha" else "Urbana"
+            else:
+                dado["unidade"] = un_anterior
+
             a_ter = dado.get("area_terreno", 0.0)
             dado["unitario"] = dado.get("valor_total", 0.0) / a_ter if a_ter > 0 else 0.0
             aplicar_nota_agronomica_no_dado(dado, self.variaveis_config)
+
+        if self.dados_pesquisas:
+            uns = {d.get("unidade", self.unidade_padrao_projeto) for d in self.dados_pesquisas}
+            if len(uns) == 1:
+                self.unidade_padrao_projeto = next(iter(uns))
+                self._atualizar_rotulo_topo()
 
         if reconstruir:
             self._reconstruir_planilha()
@@ -882,7 +1069,7 @@ class AppPesquisaMercado:
             ("municipio", "Município", 115),
             ("valor_total", self._rotulo_valor_total(), 130),
             ("area_terreno", "Área Terreno", 95),
-            ("unidade", "Unid.", 52),
+            ("unidade", "Unid.", 55),
         ])
         if self.campos_opcionais.get("area_construida", True):
             cols.append(("area_construida", "Área Const. (m²)", 105))
@@ -901,7 +1088,7 @@ class AppPesquisaMercado:
         return cols
 
     def _montar_linha_sheet(self, dado):
-        un = dado.get("unidade") or self.unidade_padrao_projeto
+        un = normalizar_unidade(dado.get("unidade") or self.unidade_padrao_projeto, padrao=self.unidade_padrao_projeto)
         dado["unidade"] = un
         casas = 4 if un == "ha" else 2
         v_tot = converter_para_float(dado.get("valor_total", 0.0))
@@ -953,6 +1140,9 @@ class AppPesquisaMercado:
                     self.sheet.set_cell_data(r_idx, c_idx, bool(d.get("utilizado", True)), redraw=False)
             elif chave == "unidade" and matriz:
                 self._aplicar_dropdown_aberto(self.sheet.span(0, c_idx, len(matriz), c_idx + 1), ["m²", "ha"])
+                # Garante que o tksheet preserve a unidade real (ex: 'ha') de cada linha após criar o dropdown
+                for r_idx, d in enumerate(self.dados_pesquisas):
+                    self.sheet.set_cell_data(r_idx, c_idx, d.get("unidade", self.unidade_padrao_projeto), redraw=False)
             elif chave in ("dado_id", "unitario", "status"):
                 self.sheet.readonly_columns(columns=[c_idx], readonly=True)
                 self.sheet.highlight_columns(columns=[c_idx], bg="#eef2f6", fg="#334e68")
@@ -960,6 +1150,8 @@ class AppPesquisaMercado:
                 v_cfg = next((v for v in self.variaveis_config if v["nome"] == chave[4:]), None)
                 if v_cfg and v_cfg.get("tipo") == "codigo" and v_cfg.get("opcoes") and matriz:
                     self._aplicar_dropdown_aberto(self.sheet.span(0, c_idx, len(matriz), c_idx + 1), [""] + [o for o in v_cfg["opcoes"] if o != ""])
+                    for r_idx, d in enumerate(self.dados_pesquisas):
+                        self.sheet.set_cell_data(r_idx, c_idx, d.get("variaveis_extras", {}).get(chave[4:], ""), redraw=False)
 
         self._atualizar_estatisticas_e_destaques()
         self.sheet.redraw()
@@ -968,6 +1160,17 @@ class AppPesquisaMercado:
         self.destacar_outliers = bool(self.var_destaque_out.get())
         self._atualizar_estatisticas_e_destaques()
         self.sheet.redraw()
+
+    def _alternar_criterio_outlier(self):
+        self.criterio_outlier = self.var_criterio_out.get()
+        self._atualizar_estatisticas_e_destaques()
+        self.sheet.redraw()
+
+    def _eh_outlier(self, valor_unit, est, criterio=None):
+        crit = criterio or self.criterio_outlier
+        if crit == "IQR":
+            return valor_unit < est["lim_inf_iqr"] or valor_unit > est["lim_sup_iqr"]
+        return valor_unit < est["lim_inf_30"] or valor_unit > est["lim_sup_30"]
 
     def _atualizar_estatisticas_e_destaques(self):
         if not hasattr(self, "lbl_estatisticas"):
@@ -989,49 +1192,154 @@ class AppPesquisaMercado:
             self.lbl_estatisticas.config(text=f"📊 Ativos: 0/{total} | Média: R$ 0,00 | Mediana: R$ 0,00 | CV: 0,00%", fg="#1f3c5b")
             return
         if len(unidades) > 1:
-            self.lbl_estatisticas.config(text=f"⚠ Mistura de unidades ({', '.join(unidades)})! Use 'Padronizar Unid.' para unificar.", fg="#b22222")
+            self.lbl_estatisticas.config(text=f"⚠ Mistura de unidades ({', '.join(unidades)})! Use 'Padronizar Unid.' para converter e unificar.", fg="#b22222")
             return
 
         un_str = next(iter(unidades))
-        media = statistics.mean(unitarios)
-        mediana = statistics.median(unitarios)
-        dp = statistics.stdev(unitarios) if len(unitarios) > 1 else 0.0
-        cv = (dp / media * 100.0) if media > 0 else 0.0
-
+        est = calcular_estatisticas_completas(unitarios)
         outliers = 0
         for r_idx, d in enumerate(self.dados_pesquisas):
             if not d.get("utilizado", True):
                 self.sheet.highlight_rows(rows=[r_idx], bg="#eeeeee", fg="#888888", redraw=False)
-            elif d.get("unitario", 0.0) > 0 and abs(d["unitario"] - media) > 0.30 * media:
+            elif d.get("unitario", 0.0) > 0 and self._eh_outlier(d["unitario"], est):
                 outliers += 1
                 if self.destacar_outliers and col_u is not None:
                     self.sheet.highlight_cells(row=r_idx, column=col_u, bg="#fff3cd", fg="#856404", redraw=False)
 
-        alerta = f"  •  ⚠ {outliers} fora de ±30%" if outliers else ""
+        lbl_crit = "IQR" if self.criterio_outlier == "IQR" else "±30%"
+        alerta = f"  •  ⚠ {outliers} outlier(s) [{lbl_crit}]" if outliers else ""
         self.lbl_estatisticas.config(
-            text=f"📊 Ativos: {len(unitarios)}/{total}  •  Média: R$ {formatar_moeda_br(media)}/{un_str}  •  Mediana: R$ {formatar_moeda_br(mediana)}  •  DP: R$ {formatar_moeda_br(dp)}  •  CV: {formatar_numero_br(cv, 2)}%{alerta}",
+            text=(
+                f"📊 Ativos: {est['n']}/{total}  •  Média: R$ {formatar_moeda_br(est['media'])}/{un_str}  •  "
+                f"Mediana: R$ {formatar_moeda_br(est['mediana'])}  •  DP: R$ {formatar_moeda_br(est['dp'])}  •  "
+                f"CV: {formatar_numero_br(est['cv'], 2)}%  •  IQR: R$ {formatar_moeda_br(est['iqr'])}{alerta}"
+            ),
             fg="#1f3c5b"
         )
 
-    def _desativar_outliers_30(self):
+    def _janela_analise_estatistica(self):
+        self._commit_editor_ativo()
+        ativos = [d for d in self.dados_pesquisas if d.get("utilizado", True) and d.get("unitario", 0.0) > 0]
+        if len(ativos) < 2:
+            messagebox.showinfo("Análise Estatística", "É necessário pelo menos 2 amostras ativas com unitário válido.")
+            return
+        unidades = {d.get("unidade", self.unidade_padrao_projeto) for d in ativos}
+        if len(unidades) > 1:
+            messagebox.showwarning("Unidades Mistas", "Padronize as unidades antes de gerar a análise estatística.")
+            return
+
+        un_str = next(iter(unidades))
+        unitarios = [d["unitario"] for d in ativos]
+        est = calcular_estatisticas_completas(unitarios)
+
+        out_30 = [f"D.{d['dado_id']} (R$ {formatar_moeda_br(d['unitario'])})" for d in ativos if self._eh_outlier(d["unitario"], est, "30%")]
+        out_iqr = [f"D.{d['dado_id']} (R$ {formatar_moeda_br(d['unitario'])})" for d in ativos if self._eh_outlier(d["unitario"], est, "IQR")]
+
+        janela = tk.Toplevel(self.root)
+        janela.title(f"Análise Estatística & Boxplot ({est['n']} amostras ativas)")
+        janela.geometry("760x540")
+        janela.transient(self.root)
+
+        f_top = ttk.LabelFrame(janela, text=f" Resumo Estatístico (R$/{un_str}) ", padding=10)
+        f_top.pack(fill="x", padx=12, pady=8)
+
+        metricas = [
+            ("Amostras Ativas:", f"{est['n']}", "Mínimo:", f"R$ {formatar_moeda_br(est['minimo'])}"),
+            ("Média:", f"R$ {formatar_moeda_br(est['media'])}", "Máximo:", f"R$ {formatar_moeda_br(est['maximo'])}"),
+            ("Mediana (Q2):", f"R$ {formatar_moeda_br(est['q2'])}", "Desvio Padrão:", f"R$ {formatar_moeda_br(est['dp'])}"),
+            ("1º Quartil (Q1):", f"R$ {formatar_moeda_br(est['q1'])}", "Coef. Variação (CV):", f"{formatar_numero_br(est['cv'], 2)}%"),
+            ("3º Quartil (Q3):", f"R$ {formatar_moeda_br(est['q3'])}", "Intervalo Interquartil (IQR):", f"R$ {formatar_moeda_br(est['iqr'])}"),
+        ]
+        for idx, (k1, v1, k2, v2) in enumerate(metricas):
+            ttk.Label(f_top, text=k1, font=("Segoe UI", 9, "bold")).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
+            ttk.Label(f_top, text=v1).grid(row=idx, column=1, sticky="w", padx=(2, 24), pady=2)
+            ttk.Label(f_top, text=k2, font=("Segoe UI", 9, "bold")).grid(row=idx, column=2, sticky="w", padx=6, pady=2)
+            ttk.Label(f_top, text=v2).grid(row=idx, column=3, sticky="w", padx=2, pady=2)
+
+        f_box = ttk.LabelFrame(janela, text=" Boxplot dos Valores Unitários ", padding=8)
+        f_box.pack(fill="x", padx=12, pady=6)
+        canvas = tk.Canvas(f_box, height=130, bg="white", highlightthickness=1, highlightbackground="#cbd5e1")
+        canvas.pack(fill="x", expand=True)
+
+        w_c = 700
+        pad_x = 45
+        v_min_plot = min(est["minimo"], est["lim_inf_iqr"])
+        v_max_plot = max(est["maximo"], est["lim_sup_iqr"])
+        span = (v_max_plot - v_min_plot) or 1.0
+
+        def map_x(v):
+            return pad_x + ((v - v_min_plot) / span) * (w_c - 2 * pad_x)
+
+        y_mid = 62
+        x_q1, x_q2, x_q3 = map_x(est["q1"]), map_x(est["q2"]), map_x(est["q3"])
+        inliers = [v for v in unitarios if est["lim_inf_iqr"] <= v <= est["lim_sup_iqr"]]
+        w_low = min(inliers) if inliers else est["minimo"]
+        w_high = max(inliers) if inliers else est["maximo"]
+        x_wl, x_wh = map_x(w_low), map_x(w_high)
+
+        # Bigodes
+        canvas.create_line(x_wl, y_mid, x_q1, y_mid, fill="#1f3c5b", width=2)
+        canvas.create_line(x_q3, y_mid, x_wh, y_mid, fill="#1f3c5b", width=2)
+        canvas.create_line(x_wl, y_mid - 14, x_wl, y_mid + 14, fill="#1f3c5b", width=2)
+        canvas.create_line(x_wh, y_mid - 14, x_wh, y_mid + 14, fill="#1f3c5b", width=2)
+        # Caixa Q1-Q3
+        canvas.create_rectangle(x_q1, y_mid - 22, x_q3, y_mid + 22, fill="#dbeafe", outline="#1f3c5b", width=2)
+        # Mediana
+        canvas.create_line(x_q2, y_mid - 22, x_q2, y_mid + 22, fill="#b91c1c", width=3)
+        # Média (losango verde)
+        x_med = map_x(est["media"])
+        canvas.create_polygon(x_med, y_mid - 7, x_med + 7, y_mid, x_med, y_mid + 7, x_med - 7, y_mid, fill="#15803d", outline="#14532d")
+
+        # Pontos de outliers (IQR)
+        for d in ativos:
+            v = d["unitario"]
+            if v < est["lim_inf_iqr"] or v > est["lim_sup_iqr"]:
+                xp = map_x(v)
+                canvas.create_oval(xp - 4, y_mid - 4, xp + 4, y_mid + 4, fill="#f59e0b", outline="#92400e")
+                canvas.create_text(xp, y_mid - 14, text=f"D.{d['dado_id']}", font=("Segoe UI", 7, "bold"), fill="#92400e")
+
+        canvas.create_text(x_wl, 108, text=f"Min: {formatar_moeda_br(w_low)}", font=("Segoe UI", 8), fill="#334155")
+        canvas.create_text(x_q2, 22, text=f"Q2: {formatar_moeda_br(est['q2'])}", font=("Segoe UI", 8, "bold"), fill="#b91c1c")
+        canvas.create_text(x_wh, 108, text=f"Max: {formatar_moeda_br(w_high)}", font=("Segoe UI", 8), fill="#334155")
+
+        f_comp = ttk.LabelFrame(janela, text=" Comparação de Critérios de Outliers (Atenção: não exclui automaticamente) ", padding=10)
+        f_comp.pack(fill="both", expand=True, padx=12, pady=6)
+
+        ttk.Label(
+            f_comp,
+            text=f"• Critério ±30% da Média [R$ {formatar_moeda_br(est['lim_inf_30'])} a R$ {formatar_moeda_br(est['lim_sup_30'])}]:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor="w")
+        ttk.Label(f_comp, text="   " + (", ".join(out_30) if out_30 else "Nenhuma amostra fora da faixa."), wraplength=700).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(
+            f_comp,
+            text=f"• Critério IQR / Tukey (1,5 × IQR) [R$ {formatar_moeda_br(est['lim_inf_iqr'])} a R$ {formatar_moeda_br(est['lim_sup_iqr'])}]:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor="w")
+        ttk.Label(f_comp, text="   " + (", ".join(out_iqr) if out_iqr else "Nenhuma amostra fora da faixa."), wraplength=700).pack(anchor="w")
+
+    def _desativar_outliers_criterio(self):
         self._commit_editor_ativo()
         ativos = [d["unitario"] for d in self.dados_pesquisas if d.get("utilizado", True) and d.get("unitario", 0.0) > 0]
         if len(ativos) < 2:
-            messagebox.showinfo("Outliers", "É necessário pelo menos 2 amostras ativas com unitário válido.")
+            messagebox.showinfo("Saneamento", "É necessário pelo menos 2 amostras ativas com unitário válido.")
             return
-        media = statistics.mean(ativos)
-        n_des = 0
-        for d in self.dados_pesquisas:
-            if d.get("utilizado", True) and d.get("unitario", 0.0) > 0 and abs(d["unitario"] - media) > 0.30 * media:
-                d["utilizado"] = False
-                n_des += 1
-        if n_des:
-            self.alteracoes_pendentes = True
-            self._reconstruir_planilha()
-            self._autosave()
-            messagebox.showinfo("Saneamento", f"{n_des} amostra(s) fora de ±30% foram marcadas como 'Não utilizado no modelo'.")
-        else:
-            messagebox.showinfo("Saneamento", "Nenhuma amostra ativa está fora de ±30% da média.")
+        est = calcular_estatisticas_completas(ativos)
+        lbl = "IQR (Tukey)" if self.criterio_outlier == "IQR" else "±30% da média"
+        candidatos = [d for d in self.dados_pesquisas if d.get("utilizado", True) and d.get("unitario", 0.0) > 0 and self._eh_outlier(d["unitario"], est)]
+        if not candidatos:
+            messagebox.showinfo("Saneamento", f"Nenhuma amostra ativa está fora do critério {lbl}.")
+            return
+        ids_txt = ", ".join(f"D.{d['dado_id']}" for d in candidatos)
+        if not messagebox.askyesno("Confirmar Saneamento", f"Critério ativo: {lbl}\n\nDeseja desativar {len(candidatos)} amostra(s) ({ids_txt})?"):
+            return
+        for d in candidatos:
+            d["utilizado"] = False
+        self.alteracoes_pendentes = True
+        self._atualizar_rotulo_topo()
+        self._reconstruir_planilha()
+        self._autosave()
 
     def _copiar_tabela_sisdea(self):
         self._commit_editor_ativo()
@@ -1088,19 +1396,36 @@ class AppPesquisaMercado:
         if chave in ("dado_id", "unitario", "status"):
             return
         dado = self.dados_pesquisas[r]
-        self.alteracoes_pendentes = True
 
         if chave == "utilizado":
             dado["utilizado"] = bool(novo_val) if isinstance(novo_val, bool) else str(novo_val).strip().lower() not in ("false", "0", "não", "nao", "")
         elif chave == "valor_total":
-            dado["valor_total"] = converter_para_float(novo_val)
+            val_f, ok = converter_para_float_validado(novo_val)
+            if not ok:
+                messagebox.showwarning("Valor Inválido", f"'{novo_val}' não é um valor numérico válido.")
+            else:
+                dado["valor_total"] = val_f
         elif chave == "area_terreno":
-            dado["area_terreno"] = converter_para_float(novo_val, permitir_milhar_ponto=(dado.get("unidade", self.unidade_padrao_projeto) != "ha"))
+            un_atual = normalizar_unidade(dado.get("unidade", self.unidade_padrao_projeto))
+            val_f, ok = converter_para_float_validado(novo_val, permitir_milhar_ponto=(un_atual != "ha"))
+            if not ok:
+                messagebox.showwarning("Área Inválida", f"'{novo_val}' não é uma área numérica válida.")
+            else:
+                dado["area_terreno"] = val_f
         elif chave == "area_construida":
-            dado["area_construida"] = converter_para_float(novo_val)
+            val_f, ok = converter_para_float_validado(novo_val)
+            if not ok:
+                messagebox.showwarning("Área Inválida", f"'{novo_val}' não é uma área numérica válida.")
+            else:
+                dado["area_construida"] = val_f
         elif chave == "unidade":
-            un_str = "ha" if "ha" in str(novo_val).lower() else "m²"
-            dado["unidade"], dado["localizacao"] = un_str, ("Rural" if un_str == "ha" else "Urbana")
+            un_antiga = normalizar_unidade(dado.get("unidade", self.unidade_padrao_projeto))
+            un_nova = normalizar_unidade(novo_val, padrao=un_antiga)
+            if un_nova != un_antiga:
+                if dado.get("area_terreno", 0.0) > 0:
+                    dado["area_terreno"] = converter_area(dado["area_terreno"], un_antiga, un_nova)
+                dado["unidade"] = un_nova
+                dado["localizacao"] = "Rural" if un_nova == "ha" else "Urbana"
         elif chave == "telefone":
             dado["telefone"] = sanitizar_telefone(novo_val)
         elif chave in ("coord_e", "coord_s"):
@@ -1111,6 +1436,13 @@ class AppPesquisaMercado:
         else:
             dado[chave] = sanitizar_texto_celula(novo_val)
 
+        self.alteracoes_pendentes = True
+        if self.dados_pesquisas:
+            uns = {d.get("unidade", self.unidade_padrao_projeto) for d in self.dados_pesquisas}
+            if len(uns) == 1:
+                self.unidade_padrao_projeto = next(iter(uns))
+        self._atualizar_rotulo_topo()
+
         for col_i, val_i in enumerate(self._montar_linha_sheet(dado)):
             self.sheet.set_cell_data(r, col_i, val_i, redraw=False)
         self._atualizar_estatisticas_e_destaques()
@@ -1119,16 +1451,18 @@ class AppPesquisaMercado:
     def _ao_colar_planilha(self, event=None):
         self._sincronizar_matriz_para_dados(reconstruir=True)
         self.alteracoes_pendentes = True
+        self._atualizar_rotulo_topo()
         self._autosave()
 
     def _ao_deletar_conteudo(self, event=None):
         self._sincronizar_matriz_para_dados(reconstruir=True)
         self.alteracoes_pendentes = True
+        self._atualizar_rotulo_topo()
         self._autosave()
 
     def _criar_registro_vazio(self, herdar_anterior=True):
         ant = self.dados_pesquisas[-1] if (herdar_anterior and self.dados_pesquisas) else {}
-        un = ant.get("unidade") or self.unidade_padrao_projeto
+        un = normalizar_unidade(ant.get("unidade") or self.unidade_padrao_projeto, padrao=self.unidade_padrao_projeto)
         reg = {
             "dado_id": len(self.dados_pesquisas) + 1, "utilizado": True,
             "informante": "", "telefone": "", "endereco": "", "bairro": "",
@@ -1150,6 +1484,7 @@ class AppPesquisaMercado:
         copia["dado_id"] = len(self.dados_pesquisas) + 1
         self.dados_pesquisas.append(copia)
         self.alteracoes_pendentes = True
+        self._atualizar_rotulo_topo()
         self._reconstruir_planilha()
         self._autosave()
 
@@ -1163,6 +1498,7 @@ class AppPesquisaMercado:
             if r < len(self.dados_pesquisas):
                 self.dados_pesquisas[r]["utilizado"] = not self.dados_pesquisas[r].get("utilizado", True)
         self.alteracoes_pendentes = True
+        self._atualizar_rotulo_topo()
         self._reconstruir_planilha()
         self._autosave()
 
@@ -1192,6 +1528,7 @@ class AppPesquisaMercado:
             d["dado_id"] = i + 1
         self.celula_ativa = {"row": None, "col": None, "chave": None}
         self.alteracoes_pendentes = True
+        self._atualizar_rotulo_topo()
         self._reconstruir_planilha()
         self._autosave()
 
@@ -1232,6 +1569,7 @@ class AppPesquisaMercado:
                 messagebox.showwarning("Nada encontrado", "Não foi possível detectar valor, área, telefone ou link no texto.")
                 return
             self.alteracoes_pendentes = True
+            self._atualizar_rotulo_topo()
             self._reconstruir_planilha()
             self._autosave()
             janela.destroy()
@@ -1346,6 +1684,7 @@ class AppPesquisaMercado:
         dado["foto1"] = self.lat_foto1.get().strip()
         dado["foto2"] = self.lat_foto2.get().strip()
         self.alteracoes_pendentes = True
+        self._atualizar_rotulo_topo()
         self._atualizar_painel_lateral(r)
         for col_i, val_i in enumerate(self._montar_linha_sheet(dado)):
             self.sheet.set_cell_data(r, col_i, val_i, redraw=False)
@@ -1366,30 +1705,30 @@ class AppPesquisaMercado:
                 return rel
         return caminho
 
-    # --- JANELA CAMPOS LAPIDADA (VENDA/ALUGUEL + MODELO + CAMPOS OPCIONAIS) ---
+    # --- JANELA CAMPOS, MODELO E PERSONALIZAÇÃO DO WORD ---
     def _janela_campos_opcionais(self):
         self._commit_editor_ativo()
         janela = tk.Toplevel(self.root)
-        janela.title("Campos, Modelo e Finalidade da Ficha")
-        janela.geometry("430x420")
+        janela.title("Campos, Modelo, Finalidade e Word")
+        janela.geometry("480x555")
         janela.resizable(False, False)
         janela.transient(self.root)
         janela.grab_set()
 
         f_fin = ttk.LabelFrame(janela, text=" 1. Finalidade da Pesquisa ", padding=8)
-        f_fin.pack(fill="x", padx=12, pady=(10, 6))
+        f_fin.pack(fill="x", padx=12, pady=(10, 5))
         var_fin = tk.StringVar(value=self.finalidade_ativa)
         ttk.Radiobutton(f_fin, text="Venda (Valor Total / Oferta)", value="VENDA", variable=var_fin).pack(anchor="w", padx=10, pady=2)
         ttk.Radiobutton(f_fin, text="Locação / Aluguel (Valor do Aluguel)", value="ALUGUEL", variable=var_fin).pack(anchor="w", padx=10, pady=2)
 
         f_mod = ttk.LabelFrame(janela, text=" 2. Modelo de Ficha Word ", padding=8)
-        f_mod.pack(fill="x", padx=12, pady=6)
+        f_mod.pack(fill="x", padx=12, pady=5)
         var_mod = tk.StringVar(value=self.modelo_ativo)
         ttk.Radiobutton(f_mod, text="Modelo 1 - Padrão / Memória de Cálculo", value="PADRAO", variable=var_mod).pack(anchor="w", padx=10, pady=2)
         ttk.Radiobutton(f_mod, text="Modelo 2 - Contrato COPASA", value="COPASA", variable=var_mod).pack(anchor="w", padx=10, pady=2)
 
         f_opc = ttk.LabelFrame(janela, text=" 3. Campos Opcionais na Grade, Excel e Word ", padding=8)
-        f_opc.pack(fill="x", padx=12, pady=6)
+        f_opc.pack(fill="x", padx=12, pady=5)
         rotulos = {
             "telefone": "Telefone / Contato",
             "bairro": "Bairro",
@@ -1400,23 +1739,41 @@ class AppPesquisaMercado:
         vars_tk = {}
         for chave, rot in rotulos.items():
             v = tk.BooleanVar(value=self.campos_opcionais.get(chave, True))
-            ttk.Checkbutton(f_opc, text=rot, variable=v).pack(anchor="w", padx=12, pady=2)
+            ttk.Checkbutton(f_opc, text=rot, variable=v).pack(anchor="w", padx=12, pady=1)
             vars_tk[chave] = v
 
-        ttk.Label(janela, text="Dica: Desmarque colunas que não existem na sua planilha antes de colar.", font=("Segoe UI", 8, "italic"), foreground="#555555").pack(pady=(2, 6))
+        f_word = ttk.LabelFrame(janela, text=" 4. Personalização do Relatório Word ", padding=8)
+        f_word.pack(fill="x", padx=12, pady=5)
+        ttk.Label(f_word, text="Título (Modelo Padrão):").grid(row=0, column=0, sticky="w", pady=2)
+        e_tit = ttk.Entry(f_word, width=36)
+        e_tit.insert(0, self.config_word.get("titulo_padrao", DEFAULT_CONFIG_WORD["titulo_padrao"]))
+        e_tit.grid(row=0, column=1, padx=4, pady=2)
+
+        ttk.Label(f_word, text="Identificação COPASA:").grid(row=1, column=0, sticky="w", pady=2)
+        e_cop = ttk.Entry(f_word, width=36)
+        e_cop.insert(0, self.config_word.get("contrato_copasa", DEFAULT_CONFIG_WORD["contrato_copasa"]))
+        e_cop.grid(row=1, column=1, padx=4, pady=2)
+
+        ttk.Label(f_word, text="Rodapé (opcional):").grid(row=2, column=0, sticky="w", pady=2)
+        e_rod = ttk.Entry(f_word, width=36)
+        e_rod.insert(0, self.config_word.get("rodape", ""))
+        e_rod.grid(row=2, column=1, padx=4, pady=2)
 
         def aplicar():
             self.finalidade_ativa = var_fin.get()
             self.modelo_ativo = var_mod.get()
             for chave, v in vars_tk.items():
                 self.campos_opcionais[chave] = v.get()
+            self.config_word["titulo_padrao"] = e_tit.get().strip() or DEFAULT_CONFIG_WORD["titulo_padrao"]
+            self.config_word["contrato_copasa"] = e_cop.get().strip() or DEFAULT_CONFIG_WORD["contrato_copasa"]
+            self.config_word["rodape"] = e_rod.get().strip()
             self.alteracoes_pendentes = True
             self._atualizar_rotulo_topo()
             self._reconstruir_planilha()
             self._autosave()
             janela.destroy()
 
-        ttk.Button(janela, text="✔ Aplicar Configurações", style="Primary.TButton", command=aplicar).pack(pady=6)
+        ttk.Button(janela, text="✔ Aplicar Configurações", style="Primary.TButton", command=aplicar).pack(pady=10)
 
     def _salvar_como_novo_perfil(self):
         nome = simpledialog.askstring("Salvar Perfil", "Nome para este perfil (ex: Rural Goianésia):", parent=self.root)
@@ -1434,15 +1791,29 @@ class AppPesquisaMercado:
 
     def _aplicar_perfil_rapido(self, tipo):
         self._commit_editor_ativo()
+        if self.dados_pesquisas:
+            resp = messagebox.askyesno(
+                "Confirmar Troca de Perfil",
+                f"Já existem {len(self.dados_pesquisas)} amostra(s) cadastrada(s).\n\n"
+                f"Aplicar o perfil '{tipo}' alterará o modelo, as variáveis ativas e a unidade padrão do projeto.\n"
+                "Os valores já digitados serão mantidos, mas a estrutura da planilha mudará.\n\n"
+                "Deseja continuar?"
+            )
+            if not resp:
+                return
+
         if tipo == "URBANO":
             self.modelo_ativo, self.variaveis_config, self.unidade_padrao_projeto = "PADRAO", copy.deepcopy(DEFAULT_VARS_PADRAO), "m²"
         elif tipo == "RURAL":
             self.modelo_ativo, self.variaveis_config, self.unidade_padrao_projeto = "PADRAO", copy.deepcopy(DEFAULT_VARS_RURAL), "ha"
         elif tipo == "COPASA":
             self.modelo_ativo, self.variaveis_config, self.unidade_padrao_projeto = "COPASA", copy.deepcopy(DEFAULT_VARS_COPASA), "m²"
+
+        self.alteracoes_pendentes = True
         self._salvar_config_variaveis()
         self._atualizar_rotulo_topo()
         self._reconstruir_planilha()
+        self._autosave()
 
     def _janela_config_variaveis(self):
         self._commit_editor_ativo()
@@ -1513,9 +1884,12 @@ class AppPesquisaMercado:
                         opts = [""] + opts
                     novas.append({"nome": en.get().strip(), "tipo": ct.get(), "opcoes": opts})
             self.variaveis_config = novas
+            self.alteracoes_pendentes = True
             self._registrar_no_catalogo_global(novas)
             self._salvar_config_variaveis()
+            self._atualizar_rotulo_topo()
             self._reconstruir_planilha()
+            self._autosave()
             janela.destroy()
 
         ttk.Button(janela, text="💾 Salvar e Atualizar Planilha", style="Primary.TButton", command=salvar).pack(pady=8)
@@ -1535,7 +1909,7 @@ class AppPesquisaMercado:
         for sit, p_s in [("Ótima", "1,00"), ("Muito Boa", "0,95"), ("Boa", "0,90"), ("Desfavorável", "0,80"), ("Má", "0,75"), ("Péssima", "0,70")]:
             t_ref.insert("", "end", values=(sit, p_s) + tuple(TABELA_NOTA_AGRONOMICA[r][sit] for r in ("I", "II", "III", "IV", "V", "VI")))
 
-    # --- ABRIR / SALVAR PROJETO ---
+    # --- ABRIR / SALVAR PROJETO (SEGURO E ATÔMICO) ---
     def _salvar_projeto(self):
         self._commit_editor_ativo()
         caminho = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Projeto de Pesquisa", "*.json")])
@@ -1545,32 +1919,50 @@ class AppPesquisaMercado:
         pasta_anexos = self._obter_pasta_anexos_projeto()
         dir_proj = os.path.dirname(caminho)
 
+        falhas_fotos = []
         for d in self.dados_pesquisas:
             for cf in ("foto1", "foto2"):
                 orig = self._resolver_caminho_foto(d.get(cf, ""))
-                if orig and os.path.exists(orig) and not orig.startswith("http"):
-                    os.makedirs(pasta_anexos, exist_ok=True)
-                    dest = os.path.join(pasta_anexos, os.path.basename(orig))
-                    if os.path.abspath(orig) != os.path.abspath(dest):
-                        try:
+                if orig and os.path.exists(orig) and not orig.startswith(("http://", "https://")):
+                    try:
+                        os.makedirs(pasta_anexos, exist_ok=True)
+                        dest = os.path.join(pasta_anexos, os.path.basename(orig))
+                        if os.path.abspath(orig) != os.path.abspath(dest):
                             shutil.copy2(orig, dest)
-                        except Exception:
-                            pass
-                    d[cf] = os.path.relpath(dest, dir_proj)
+                        # Só altera o caminho se a cópia estiver realmente confirmada no destino
+                        if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                            d[cf] = os.path.relpath(dest, dir_proj)
+                        else:
+                            falhas_fotos.append(f"D.{d['dado_id']} ({cf}): cópia não confirmada")
+                    except Exception as e:
+                        logging.error(f"Falha ao copiar foto '{orig}': {e}")
+                        falhas_fotos.append(f"D.{d['dado_id']} ({cf}): {e}")
+
+        payload = {
+            "modelo": self.modelo_ativo,
+            "finalidade": self.finalidade_ativa,
+            "unidade_padrao": self.unidade_padrao_projeto,
+            "campos_opcionais": self.campos_opcionais,
+            "config_word": self.config_word,
+            "variaveis_config": self.variaveis_config,
+            "pesquisas": self.dados_pesquisas
+        }
 
         try:
-            with open(caminho, "w", encoding="utf-8") as f:
-                json.dump({
-                    "modelo": self.modelo_ativo,
-                    "finalidade": self.finalidade_ativa,
-                    "unidade_padrao": self.unidade_padrao_projeto,
-                    "campos_opcionais": self.campos_opcionais,
-                    "variaveis_config": self.variaveis_config,
-                    "pesquisas": self.dados_pesquisas
-                }, f, ensure_ascii=False, indent=4)
+            salvar_json_atomico(caminho, payload, criar_backup=True)
             self.alteracoes_pendentes = False
-            messagebox.showinfo("Sucesso", "Projeto e anexos salvos com sucesso!")
+            self._atualizar_rotulo_topo()
+            self._autosave()
+            if falhas_fotos:
+                messagebox.showwarning(
+                    "Projeto Salvo com Ressalvas",
+                    "O arquivo JSON foi salvo com segurança (e backup criado), mas algumas fotos não puderam ser copiadas "
+                    "(seus caminhos originais foram mantidos):\n\n• " + "\n• ".join(falhas_fotos[:8])
+                )
+            else:
+                messagebox.showinfo("Sucesso", "Projeto e anexos salvos com sucesso!")
         except Exception as e:
+            logging.error(f"Erro ao salvar projeto '{caminho}': {e}")
             messagebox.showerror("Erro", f"Erro ao salvar arquivo: {e}")
 
     def _aplicar_conteudo_json(self, conteudo):
@@ -1579,8 +1971,12 @@ class AppPesquisaMercado:
         self.variaveis_config = conteudo.get("variaveis_config") or copy.deepcopy(DEFAULT_VARS_PADRAO)
         self._registrar_no_catalogo_global(self.variaveis_config)
         self.campos_opcionais = conteudo.get("campos_opcionais") or copy.deepcopy(DEFAULT_CAMPOS_OPCIONAIS)
+        self.config_word = copy.deepcopy(DEFAULT_CONFIG_WORD)
+        self.config_word.update(conteudo.get("config_word") or {})
         raw = conteudo.get("pesquisas", [])
-        un_pad = conteudo.get("unidade_padrao") or ("ha" if any(d.get("unidade") == "ha" for d in raw) else "m²")
+        un_pad = normalizar_unidade(
+            conteudo.get("unidade_padrao") or ("ha" if any(normalizar_unidade(d.get("unidade", "")) == "ha" for d in raw) else "m²")
+        )
         self.unidade_padrao_projeto = un_pad
         self.dados_pesquisas = [normalizar_dado(d, self.variaveis_config, unidade_padrao=un_pad) for d in raw]
         self.alteracoes_pendentes = False
@@ -1606,7 +2002,7 @@ class AppPesquisaMercado:
     def _abrir_projeto_menu(self):
         self._executar_abertura_json()
 
-    # --- IMPORTAÇÃO EXCEL ---
+    # --- IMPORTAÇÃO EXCEL COM PRÉVIA ---
     def _importar_planilha_excel(self):
         self._commit_editor_ativo()
         caminho = filedialog.askopenfilename(filetypes=[("Planilhas Excel", "*.xlsx *.xls")])
@@ -1619,13 +2015,45 @@ class AppPesquisaMercado:
             header_row = 0
             for idx, row in df_scan.head(10).iterrows():
                 vals = [str(v).strip().lower() for v in row.dropna().values]
-                if any(k in vals for k in ["informante", "endereço", "endereco", "valor total (r$)", "valor do aluguel (r$)", "área terreno (m²)"]):
+                if any(k in vals for k in ["informante", "endereço", "endereco", "valor total (r$)", "valor do aluguel (r$)", "área terreno (m²)", "área terreno (ha)"]):
                     header_row = idx
                     break
             df = pd.read_excel(caminho, sheet_name=sheet_name, header=header_row)
-            self._processar_dataframe_importado(df)
+            self._mostrar_previa_importacao(df, os.path.basename(caminho))
         except Exception as e:
             messagebox.showerror("Erro na Importação", f"Falha ao ler planilha: {e}")
+
+    def _mostrar_previa_importacao(self, df, nome_arquivo):
+        janela = tk.Toplevel(self.root)
+        janela.title(f"Prévia da Importação — {nome_arquivo}")
+        janela.geometry("820x420")
+        janela.transient(self.root)
+        janela.grab_set()
+
+        ttk.Label(
+            janela,
+            text=f"Foram encontradas {len(df)} linha(s) e {len(df.columns)} coluna(s). Confira as primeiras linhas antes de importar:",
+            font=("Segoe UI", 9, "bold")
+        ).pack(anchor="w", padx=12, pady=(10, 6))
+
+        cols_prev = list(df.columns)[:10]
+        tree = ttk.Treeview(janela, columns=cols_prev, show="headings", height=12)
+        for col in cols_prev:
+            tree.heading(col, text=str(col))
+            tree.column(col, width=110, anchor="w")
+        for _, row in df.head(15).iterrows():
+            tree.insert("", "end", values=[sanitizar_texto_celula(row.get(c, "")) for c in cols_prev])
+        tree.pack(fill="both", expand=True, padx=12, pady=4)
+
+        f_btn = ttk.Frame(janela, padding=8)
+        f_btn.pack(fill="x")
+
+        def confirmar():
+            janela.destroy()
+            self._processar_dataframe_importado(df)
+
+        ttk.Button(f_btn, text="✖ Cancelar", command=janela.destroy).pack(side="right", padx=4)
+        ttk.Button(f_btn, text="✔ Confirmar Importação", style="Primary.TButton", command=confirmar).pack(side="right", padx=4)
 
     def _processar_dataframe_importado(self, df):
         mapeamento, unidade_det = {}, None
@@ -1659,7 +2087,7 @@ class AppPesquisaMercado:
             if pd.isna(row.get(mapeamento.get("informante", ""))) and pd.isna(row.get(mapeamento.get("endereco", ""))):
                 continue
             if "unidade" in mapeamento and not pd.isna(row.get(mapeamento["unidade"])):
-                un = "ha" if "ha" in str(row.get(mapeamento["unidade"])).lower() else "m²"
+                un = normalizar_unidade(row.get(mapeamento["unidade"]), padrao=self.unidade_padrao_projeto)
             else:
                 un = unidade_det or self.unidade_padrao_projeto
 
@@ -1700,13 +2128,14 @@ class AppPesquisaMercado:
         if novos:
             self.dados_pesquisas.extend(novos)
             self.alteracoes_pendentes = True
+            self._atualizar_rotulo_topo()
             self._reconstruir_planilha()
             self._autosave()
             messagebox.showinfo("Importação Concluída", f"{len(novos)} pesquisas importadas com sucesso!")
         else:
             messagebox.showwarning("Aviso", "Nenhum dado válido encontrado.")
 
-    # --- EXPORTAÇÃO EXCEL ---
+    # --- EXPORTAÇÃO EXCEL FORMATADA ---
     def _exportar_excel(self):
         self._commit_editor_ativo()
         if not self.dados_pesquisas:
@@ -1743,11 +2172,28 @@ class AppPesquisaMercado:
             pd.DataFrame(linhas_export).to_excel(writer, sheet_name="Ficha de Pesquisa", index=False)
             ws = writer.sheets["Ficha de Pesquisa"]
             ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+
+            header_fill = PatternFill(start_color="1F3C5B", end_color="1F3C5B", fill_type="solid")
+            header_font = Font(name="Calibri", size=10, bold=True, color="FFFFFF")
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
             for col_cells in ws.columns:
+                cab = str(col_cells[0].value or "")
                 ws.column_dimensions[col_cells[0].column_letter].width = min(max(max(len(str(c.value or "")) for c in col_cells) + 3, 12), 42)
-                if "R$" in str(col_cells[0].value or ""):
+                if "R$" in cab:
                     for cell in col_cells[1:]:
                         cell.number_format = '#,##0.00'
+                elif "(ha)" in cab:
+                    for cell in col_cells[1:]:
+                        cell.number_format = '#,##0.0000'
+                elif "(m²)" in cab:
+                    for cell in col_cells[1:]:
+                        cell.number_format = '#,##0.00'
+
         messagebox.showinfo("Sucesso", "Planilha Excel (SISDEA) formatada e exportada com sucesso!")
 
     # --- EXPORTAÇÃO WORD ---
@@ -1757,9 +2203,28 @@ class AppPesquisaMercado:
         url = normalizar_url_gdrive(caminho_ou_url)
         try:
             if url.startswith(("http://", "https://")):
-                resp = requests.get(url, timeout=12)
-                if resp.status_code == 200 and resp.headers.get("Content-Type", "").lower().startswith("image/"):
-                    return redimensionar_e_corrigir_imagem(io.BytesIO(resp.content))
+                if not validar_url_http(url):
+                    logging.warning(f"URL inválida ignorada: '{url}'")
+                    return None
+                with requests.get(url, timeout=12, stream=True) as resp:
+                    if resp.status_code != 200:
+                        return None
+                    ctype = resp.headers.get("Content-Type", "").lower()
+                    if not ctype.startswith("image/"):
+                        logging.warning(f"Conteúdo não é imagem ({ctype}): '{url}'")
+                        return None
+                    buf = io.BytesIO()
+                    total = 0
+                    for chunk in resp.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > MAX_DOWNLOAD_IMAGEM_BYTES:
+                            logging.warning(f"Imagem excedeu o limite de 10 MB: '{url}'")
+                            return None
+                        buf.write(chunk)
+                    buf.seek(0)
+                    return redimensionar_e_corrigir_imagem(buf)
             else:
                 real = self._resolver_caminho_foto(url)
                 if real and os.path.exists(real):
@@ -1794,7 +2259,11 @@ class AppPesquisaMercado:
         lista = [d for d in self.dados_pesquisas if (not so_ativos or d.get("utilizado", True))]
         threading.Thread(
             target=self._processar_geracao_word,
-            args=(caminho, copy.deepcopy(lista), copy.deepcopy(self.variaveis_config), self.modelo_ativo, self.finalidade_ativa, copy.deepcopy(self.campos_opcionais)),
+            args=(
+                caminho, copy.deepcopy(lista), copy.deepcopy(self.variaveis_config),
+                self.modelo_ativo, self.finalidade_ativa, copy.deepcopy(self.campos_opcionais),
+                copy.deepcopy(self.config_word)
+            ),
             daemon=True
         ).start()
 
@@ -1812,7 +2281,7 @@ class AppPesquisaMercado:
         except Exception:
             paragrafo.add_run("[ Erro ao inserir imagem ]")
 
-    def _processar_geracao_word(self, caminho, dados_lista, variaveis_lista, modelo_sel, finalidade_sel, campos_opc):
+    def _processar_geracao_word(self, caminho, dados_lista, variaveis_lista, modelo_sel, finalidade_sel, campos_opc, cfg_word):
         try:
             doc = Document()
             total = len(dados_lista)
@@ -1821,6 +2290,14 @@ class AppPesquisaMercado:
             is_aluguel = (finalidade_sel == "ALUGUEL")
 
             section = doc.sections[0]
+            if cfg_word.get("rodape"):
+                p_rod = section.footer.paragraphs[0]
+                p_rod.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                r_rod = p_rod.add_run(cfg_word["rodape"])
+                r_rod.font.name = "Arial"
+                r_rod.font.size = Pt(8)
+                r_rod.font.color.rgb = RGBColor(100, 100, 100)
+
             if modelo_sel == "COPASA":
                 section.top_margin = section.bottom_margin = Inches(0.39375)
                 section.left_margin = section.right_margin = Inches(1.18125)
@@ -1859,7 +2336,8 @@ class AppPesquisaMercado:
                 f0.width, f1.width, f2.width = Inches(1.77), Inches(2.16), Inches(1.97)
                 for cf in (f0, f1, f2):
                     inserir_ordenado(cf._tc.get_or_add_tcPr(), parse_xml(f'<w:shd {nsdecls("w")} w:val="clear" w:color="auto" w:fill="4472C4"/>'), SUC_TCPR[1:])
-                for pf, txt, al in [(f0.paragraphs[0], "CONTRATO: COPASA I", WD_ALIGN_PARAGRAPH.LEFT), (f1.paragraphs[0], "", WD_ALIGN_PARAGRAPH.CENTER), (f2.paragraphs[0], "PESQUISA DE MERCADO", WD_ALIGN_PARAGRAPH.RIGHT)]:
+                txt_cop = cfg_word.get("contrato_copasa", DEFAULT_CONFIG_WORD["contrato_copasa"])
+                for pf, txt, al in [(f0.paragraphs[0], txt_cop, WD_ALIGN_PARAGRAPH.LEFT), (f1.paragraphs[0], "", WD_ALIGN_PARAGRAPH.CENTER), (f2.paragraphs[0], "PESQUISA DE MERCADO", WD_ALIGN_PARAGRAPH.RIGHT)]:
                     pf.alignment = al; pf.paragraph_format.space_before = Pt(0); pf.paragraph_format.space_after = Pt(0); pf.paragraph_format.line_spacing = 1.0
                     if txt:
                         rf = pf.add_run(txt); rf.bold = True; rf.font.name = "Arial"; rf.font.size = Pt(10); rf.font.color.rgb = RGBColor(255, 255, 255)
@@ -1874,7 +2352,7 @@ class AppPesquisaMercado:
                 if modelo_sel == "PADRAO":
                     if i == 0:
                         p_tit = doc.add_paragraph(); p_tit.paragraph_format.space_before = Pt(0); p_tit.paragraph_format.space_after = Pt(2)
-                        r_t = p_tit.add_run("PESQUISA DE MERCADO - MEMÓRIA DE CÁLCULO"); r_t.bold = True; r_t.font.name = "Arial"; r_t.font.size = Pt(10)
+                        r_t = p_tit.add_run(cfg_word.get("titulo_padrao", DEFAULT_CONFIG_WORD["titulo_padrao"])); r_t.bold = True; r_t.font.name = "Arial"; r_t.font.size = Pt(10)
                         p_bar = doc.add_paragraph(); p_bar.paragraph_format.space_before = Pt(0); p_bar.paragraph_format.space_after = Pt(4)
                         inserir_ordenado(p_bar._p.get_or_add_pPr(), parse_xml(f'<w:pBdr {nsdecls("w")}><w:bottom w:val="single" w:sz="12" w:space="1" w:color="245D8C"/></w:pBdr>'), SUC_PPR)
                     else:
@@ -1946,14 +2424,14 @@ class AppPesquisaMercado:
                         extras = dado.get("variaveis_extras", {})
                         add_line(p_dados, "Informações:", extras.get("Informações", ""))
                         p_dados.add_run("\n")
-                        add_line(p_dados, "Área Terreno:", f"{formatar_numero_br(dado.get('area_terreno', 0.0), 2)} m²")
+                        add_line(p_dados, "Área Terreno:", f"{formatar_numero_br(dado.get('area_terreno', 0.0), 4 if un == 'ha' else 2)} {un}")
                         if campos_opc.get("area_construida", True): add_line(p_dados, "Área Construída:", f"{formatar_numero_br(dado.get('area_construida', 0.0), 2)} m²")
                         add_line(p_dados, "Frente:", extras.get("Frente", "Não informado"))
                         p_dados.add_run("\n")
                         add_line(p_dados, "Via de acesso:", extras.get("Via de acesso", "pavimentada"))
                         add_line(p_dados, "Coordenadas UTM:", coord_txt)
                         p_dados.add_run("\n")
-                        add_line(p_dados, "Valor Unitário Locação:" if is_aluguel else "Valor Unitário:", f"R$/m² {formatar_numero_br(dado.get('unitario', 0.0), 2)}")
+                        add_line(p_dados, "Valor Unitário Locação:" if is_aluguel else "Valor Unitário:", f"R$/{un} {formatar_numero_br(dado.get('unitario', 0.0), 2)}")
                         add_line(p_dados, "Valor do Aluguel:" if is_aluguel else "Valor Total:", f"R$ {formatar_moeda_br(dado.get('valor_total', 0.0))}")
                         p_dados.add_run("\n")
                         add_line(p_dados, "Data:", dado.get("data", data_hoje_br()))
