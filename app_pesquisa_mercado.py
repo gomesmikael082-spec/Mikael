@@ -1947,7 +1947,7 @@ class AppPesquisaMercado:
         ttk.Label(f_par_hom, text="Nota Agronômica Paradigma:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
         e_nota_par = ttk.Entry(f_par_hom, width=8)
         e_nota_par.insert(0, "1,00")
-        e_nota_par.grid(row=1, column=1, padx=(0,
+      e_nota_par.grid(row=1, column=1, padx=(0, 14), pady=2)
 # --- PRÉ-ANÁLISE SISDEA (ESTATÍSTICA + HOMOGENEIZAÇÃO + REGRESSÃO LINEAR MÚLTIPLA) ---
     def _janela_analise_estatistica(self):
         self._commit_editor_ativo()
