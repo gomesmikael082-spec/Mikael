@@ -1823,7 +1823,8 @@ class AppPesquisaMercado:
                 f"CV: {formatar_numero_br(est['cv'], 2)}%  •  IQR: R$ {formatar_moeda_br(est['iqr'])}{alerta}"
             ),
             fg="#1f3c5b"
-        )# --- PRÉ-ANÁLISE SISDEA (ESTATÍSTICA + HOMOGENEIZAÇÃO + REGRESSÃO LINEAR MÚLTIPLA) ---
+        )
+# --- PRÉ-ANÁLISE SISDEA (ESTATÍSTICA + HOMOGENEIZAÇÃO + REGRESSÃO LINEAR MÚLTIPLA) ---
     def _janela_analise_estatistica(self):
         self._commit_editor_ativo()
         ativos = [d for d in self.dados_pesquisas if d.get("utilizado", True) and d.get("unitario", 0.0) > 0]
@@ -1946,7 +1947,8 @@ class AppPesquisaMercado:
         ttk.Label(f_par_hom, text="Nota Agronômica Paradigma:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
         e_nota_par = ttk.Entry(f_par_hom, width=8)
         e_nota_par.insert(0, "1,00")
-        e_nota_par.grid(row=1, column=1, padx=(0,# --- PRÉ-ANÁLISE SISDEA (ESTATÍSTICA + HOMOGENEIZAÇÃO + REGRESSÃO LINEAR MÚLTIPLA) ---
+        e_nota_par.grid(row=1, column=1, padx=(0,
+# --- PRÉ-ANÁLISE SISDEA (ESTATÍSTICA + HOMOGENEIZAÇÃO + REGRESSÃO LINEAR MÚLTIPLA) ---
     def _janela_analise_estatistica(self):
         self._commit_editor_ativo()
         ativos = [d for d in self.dados_pesquisas if d.get("utilizado", True) and d.get("unitario", 0.0) > 0]
@@ -2824,7 +2826,8 @@ class AppPesquisaMercado:
         f_b = ttk.Frame(janela, padding=10)
         f_b.pack(fill="x")
         ttk.Button(f_b, text="Converter", command=converter_agora).pack(side="left", padx=15)
-        ttk.Button(f_b, text="✔ Aplicar na Linha Selecionada", style="Primary.TButton", command=aplicar_na_linha).pack(side="right", padx=15)# --- EVENTOS DA PLANILHA ---
+        ttk.Button(f_b, text="✔ Aplicar na Linha Selecionada", style="Primary.TButton", command=aplicar_na_linha).pack(side="right", padx=15)
+# --- EVENTOS DA PLANILHA ---
     def _ao_selecionar_celula(self, event=None):
         sel = self.sheet.get_currently_selected()
         if not sel or sel.row is None or sel.column is None:
