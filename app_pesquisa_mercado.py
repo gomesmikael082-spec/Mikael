@@ -3,13 +3,19 @@ import io
 import re
 import json
 import math
+import base64
 import queue
+import socket
 import shutil
 import zipfile
+import hashlib
 import logging
+import ipaddress
 import threading
+import webbrowser
 import copy
 import statistics
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from xml.sax.saxutils import escape as xml_escape
 from datetime import datetime
 from urllib.parse import urlparse
@@ -43,7 +49,9 @@ CATALOGO_FILE = os.path.join(CONFIG_DIR, "catalogo_variaveis.json")
 PERFIS_FILE = os.path.join(CONFIG_DIR, "perfis_usuario.json")
 AUTOSAVE_FILE = os.path.join(CONFIG_DIR, "autosave_projeto.json")
 ANEXOS_TEMP_DIR = os.path.join(CONFIG_DIR, "anexos_temp")
+TILES_CACHE_DIR = os.path.join(CONFIG_DIR, "tiles_cache")
 os.makedirs(ANEXOS_TEMP_DIR, exist_ok=True)
+os.makedirs(TILES_CACHE_DIR, exist_ok=True)
 
 MAX_DOWNLOAD_IMAGEM_BYTES = 10 * 1024 * 1024  # 10 MB
 LANCZOS_FILTER = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
@@ -262,8 +270,7 @@ def buscar_combinacoes_por_nota_agronomica(nota_str):
     if not ok or num <= 0:
         return []
     nota_fmt = formatar_numero_br(num, 2)
-    exatos = []
-    proximos = []
+    exatos, proximos = [], []
     for classe in ("I", "II", "III", "IV", "V", "VI"):
         for sit, val_tab in TABELA_NOTA_AGRONOMICA[classe].items():
             if val_tab == nota_fmt:
@@ -494,6 +501,36 @@ def limpar_sufixo_coord(coord_str):
     return re.sub(r'\s*m\s*$', '', s, flags=re.IGNORECASE).strip()
 
 
+# --- SEGURANÇA DE REDE (ANTI-SSRF) ---
+def url_eh_segura_publica(url):
+    """Verifica se a URL é HTTP(S) e se resolve exclusivamente para IPs públicos (bloqueia localhost/privados)."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        host = parsed.hostname.strip().lower()
+        if host in ("localhost", "0.0.0.0") or host.endswith(".local"):
+            return False
+        infos = socket.getaddrinfo(host, None)
+        if not infos:
+            return False
+        for info in infos:
+            ip_str = info[4][0]
+            ip_obj = ipaddress.ip_address(ip_str)
+            if (
+                ip_obj.is_private
+                or ip_obj.is_loopback
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            ):
+                return False
+        return True
+    except Exception:
+        return False
+
+
 # --- GEOPROCESSAMENTO UTM <-> LAT/LON (SIRGAS 2000 / WGS84) ---
 def parse_zona_utm(zona_str, zona_padrao="22K"):
     s = sanitizar_texto_celula(zona_str).upper().replace(" ", "")
@@ -541,7 +578,7 @@ def utm_para_latlon(zona_str, coord_e, coord_s, zona_padrao="22K"):
         return None, None
     easting, ok_e = converter_para_float_validado(limpar_sufixo_coord(coord_e), permitir_milhar_ponto=False)
     northing, ok_s = converter_para_float_validado(limpar_sufixo_coord(coord_s), permitir_milhar_ponto=False)
-    if not ok_e or not ok_s or easting <= 0 or northing <= 0:
+    if not ok_e or not ok_s or not (100000.0 <= easting <= 900000.0) or not (0.0 <= northing <= 10000000.0):
         return None, None
 
     a = 6378137.0
@@ -586,14 +623,21 @@ def utm_para_latlon(zona_str, coord_e, coord_s, zona_padrao="22K"):
 
 
 def latlon_para_utm(lat_deg, lon_deg):
-    """Converte (latitude, longitude) em graus decimais para (zona_utm_str, coord_e, coord_s)."""
+    """Converte (latitude, longitude) em graus decimais para (zona_utm_str, coord_e, coord_s) com validação geográfica."""
+    if any(math.isnan(v) or math.isinf(v) for v in (lat_deg, lon_deg)):
+        raise ValueError("Latitude e longitude devem ser números finitos.")
+    if not (-80.0 <= lat_deg <= 84.0):
+        raise ValueError(f"Latitude {lat_deg}° fora dos limites válidos do sistema UTM (-80° a +84°).")
+    if not (-180.0 <= lon_deg <= 180.0):
+        raise ValueError(f"Longitude {lon_deg}° fora dos limites válidos (-180° a +180°).")
+
     a = 6378137.0
     f = 1.0 / 298.257223563
     e2 = 2 * f - f * f
     e_prime2 = e2 / (1.0 - e2)
     k0 = 0.9996
 
-    zona_num = int((lon_deg + 180.0) / 6.0) + 1
+    zona_num = min(60, max(1, int((lon_deg + 180.0) / 6.0) + 1))
     letras = "CDEFGHJKLMNPQRSTUVWX"
     idx_banda = int((lat_deg + 80.0) / 8.0)
     idx_banda = max(0, min(len(letras) - 1, idx_banda))
@@ -639,7 +683,9 @@ def parse_latlon_texto(texto):
 
     m_url = re.search(r"[@?](?:q=)?(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)", s)
     if m_url:
-        return float(m_url.group(1)), float(m_url.group(2))
+        lat, lon = float(m_url.group(1)), float(m_url.group(2))
+        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+            return lat, lon
 
     m_gms = re.findall(r"(\d{1,3})[°º]\s*(\d{1,2})['′]\s*([\d.,]+)\"?\s*([NSEWO])", s, re.IGNORECASE)
     if len(m_gms) >= 2:
@@ -649,13 +695,14 @@ def parse_latlon_texto(texto):
             if hem.upper() in ("S", "W", "O"):
                 dec = -dec
             vals.append(dec)
-        return vals[0], vals[1]
+        if -90.0 <= vals[0] <= 90.0 and -180.0 <= vals[1] <= 180.0:
+            return vals[0], vals[1]
 
     s_norm = re.sub(r"(\d),(\d)", r"\1.\2", s)
     nums = re.findall(r"-?\d+\.\d+", s_norm)
     if len(nums) >= 2:
         lat, lon = float(nums[0]), float(nums[1])
-        if -90 <= lat <= 90 and -180 <= lon <= 180:
+        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
             return lat, lon
     return None, None
 
@@ -800,10 +847,43 @@ def resolver_sistema_linear(A, b):
     return sol, inv
 
 
+def calcular_vifs_modelo(linhas_x):
+    """Calcula o Variance Inflation Factor (VIF) para cada regressor j = 1..k (multicolinearidade)."""
+    n = len(linhas_x)
+    p = len(linhas_x[0])
+    k = p - 1
+    if k <= 1:
+        return [None] + [1.0] * k
+    vifs = [None]
+    for j in range(1, p):
+        y_j = [linhas_x[i][j] for i in range(n)]
+        y_bar = statistics.mean(y_j)
+        sqt_j = sum((y_j[i] - y_bar) ** 2 for i in range(n))
+        if sqt_j <= 1e-15:
+            vifs.append(float("inf"))
+            continue
+        cols_outros = [0] + [c for c in range(1, p) if c != j]
+        m_sub = len(cols_outros)
+        XtX = [[sum(linhas_x[i][r] * linhas_x[i][c] for i in range(n)) for c in cols_outros] for r in cols_outros]
+        XtY = [sum(linhas_x[i][r] * y_j[i] for i in range(n)) for r in cols_outros]
+        b_sub, _ = resolver_sistema_linear(XtX, XtY)
+        if b_sub is None:
+            vifs.append(float("inf"))
+            continue
+        y_hat = [sum(b_sub[idx_c] * linhas_x[i][cols_outros[idx_c]] for idx_c in range(m_sub)) for i in range(n)]
+        sqr_j = sum((y_j[i] - y_hat[i]) ** 2 for i in range(n))
+        r2_j = max(0.0, min(1.0, 1.0 - (sqr_j / sqt_j)))
+        if r2_j >= 0.999999:
+            vifs.append(float("inf"))
+        else:
+            vifs.append(1.0 / (1.0 - r2_j))
+    return vifs
+
+
 def executar_regressao_linear_multipla(amostras, nomes_x, chaves_x, transf_y="LIN", transf_x_log=None):
     """
-    Executa Regressão Linear Múltipla (MQO / OLS) para pré-análise SISDEA.
-    transf_y: 'LIN' (q), 'LN' (ln(q)), 'INV' (1/q)
+    Executa Regressão Linear Múltipla (MQO / OLS) com diagnóstico de VIF, correção de viés log-normal
+    e proteção de domínio para transformação inversa.
     """
     transf_x_log = transf_x_log or set()
     linhas_x = []
@@ -872,6 +952,10 @@ def executar_regressao_linear_multipla(amostras, nomes_x, chaves_x, transf_y="LI
     s_erro = math.sqrt(max(0.0, s2))
     f_stat = ((sqe / gl_reg) / s2) if (gl_reg > 0 and s2 > 0) else 0.0
 
+    # Fator de correção de viés de retransformação log-normal: exp(s^2 / 2)
+    fator_vies_ln = math.exp(s2 / 2.0) if (transf_y == "LN" and s2 < 20.0) else 1.0
+    vifs = calcular_vifs_modelo(linhas_x)
+
     regressores = []
     labels_modelo = ["Intercepto (β0)"] + [
         f"ln({nomes_x[idx]})" if chaves_x[idx] in transf_x_log else nomes_x[idx]
@@ -897,31 +981,40 @@ def executar_regressao_linear_multipla(amostras, nomes_x, chaves_x, transf_y="LI
             "se": se_j,
             "t": t_j,
             "p_valor": pval_j,
-            "r_simples": r_simples
+            "r_simples": r_simples,
+            "vif": vifs[j]
         })
 
     detalhes_amostras = []
     for i, d in enumerate(amostras_validas):
         yh = y_hat_transf[i]
+        fora_dominio = False
         if transf_y == "LN":
-            q_est = math.exp(yh)
+            q_est = math.exp(yh) * fator_vies_ln
         elif transf_y == "INV":
-            q_est = (1.0 / yh) if yh != 0 else 0.0
+            if yh <= 1e-12:
+                q_est = None
+                fora_dominio = True
+            else:
+                q_est = 1.0 / yh
         else:
             q_est = yh
+
         q_obs = valores_y_orig[i]
-        erro_pct = ((q_obs - q_est) / q_est * 100.0) if q_est > 0 else 0.0
+        erro_pct = ((q_obs - q_est) / q_est * 100.0) if (q_est is not None and q_est > 0) else None
         z_res = (residuos[i] / s_erro) if s_erro > 0 else 0.0
         detalhes_amostras.append({
             "dado_id": d["dado_id"],
             "municipio": d.get("municipio", ""),
             "q_obs": q_obs,
             "q_est": q_est,
+            "fora_dominio": fora_dominio,
             "erro_pct": erro_pct,
             "z_res": z_res,
             "outlier": abs(z_res) > 2.0
         })
 
+    max_vif = max([v for v in vifs[1:] if v is not None] or [1.0])
     return {
         "n": n,
         "k": k,
@@ -933,6 +1026,8 @@ def executar_regressao_linear_multipla(amostras, nomes_x, chaves_x, transf_y="LI
         "r2_adj": r2_adj,
         "s_erro": s_erro,
         "f_stat": f_stat,
+        "fator_vies_ln": fator_vies_ln,
+        "max_vif": max_vif,
         "regressores": regressores,
         "detalhes_amostras": detalhes_amostras
     }, ""
@@ -941,10 +1036,16 @@ def executar_regressao_linear_multipla(amostras, nomes_x, chaves_x, transf_y="LI
 def redimensionar_e_corrigir_imagem(caminho_ou_stream, max_largura=1200, max_altura=850):
     try:
         if isinstance(caminho_ou_stream, io.BytesIO):
+            caminho_ou_stream.seek(0)
+            with Image.open(caminho_ou_stream) as im_check:
+                im_check.verify()
+            caminho_ou_stream.seek(0)
             img = Image.open(caminho_ou_stream)
         else:
             if not os.path.exists(caminho_ou_stream):
                 return None
+            with Image.open(caminho_ou_stream) as im_check:
+                im_check.verify()
             img = Image.open(caminho_ou_stream)
         img = ImageOps.exif_transpose(img)
         if img.mode != "RGB":
@@ -957,14 +1058,6 @@ def redimensionar_e_corrigir_imagem(caminho_ou_stream, max_largura=1200, max_alt
     except Exception as e:
         logging.warning(f"Erro ao processar imagem: {e}")
         return None
-
-
-def validar_url_http(url):
-    try:
-        parsed = urlparse(url)
-        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
-    except Exception:
-        return False
 
 
 def normalizar_url_gdrive(url):
@@ -1026,8 +1119,8 @@ def normalizar_dado(dado, variaveis_config=None, unidade_padrao="m²"):
 class AppPesquisaMercado:
     def __init__(self, root):
         self.root = root
-        self.root.title("ENPROL - Sistema de Pesquisa de Mercado v7.0 (Planilha SISDEA & KML)")
-        self.root.geometry("1360x860")
+        self.root.title("ENPROL - Sistema de Pesquisa de Mercado v7.1 (Planilha SISDEA & Geoprocessamento)")
+        self.root.geometry("1380x860")
         self.root.minsize(1080, 700)
         self._configurar_estilos()
 
@@ -1044,6 +1137,7 @@ class AppPesquisaMercado:
         self.perfis_usuario = self._carregar_perfis_usuario()
         self.caminho_projeto_atual = None
         self.alteracoes_pendentes = False
+        self.exportando_word = False
 
         self.celula_ativa = {"row": None, "col": None, "chave": None}
         self.painel_lateral_visivel = False
@@ -1186,12 +1280,10 @@ class AppPesquisaMercado:
             messagebox.showerror("Erro ao salvar perfis", str(e))
 
     def _autosave(self, forcar_limpeza=False):
-        """Gravação atômica do autosave preservando caminho original do projeto para fotos relativas."""
         if not self.dados_pesquisas:
             if forcar_limpeza and os.path.exists(AUTOSAVE_FILE):
                 try:
                     os.remove(AUTOSAVE_FILE)
-                    logging.info("Autosave limpo após confirmação de novo projeto.")
                 except Exception as e:
                     logging.error(f"Falha ao limpar autosave: {e}")
             return
@@ -1210,15 +1302,23 @@ class AppPesquisaMercado:
         except Exception as e:
             logging.error(f"Erro ao gravar autosave: {e}")
 
-    def _ao_fechar_janela(self):
+    def _verificar_descarte_seguro(self, acao_nome="continuar"):
+        """Retorna True se puder prosseguir; pergunta Salvar/Descartar/Cancelar se houver alterações pendentes."""
         self._commit_editor_ativo()
         if self.dados_pesquisas and self.alteracoes_pendentes:
-            self._autosave()
-            resp = messagebox.askyesnocancel("Sair do Sistema", "Existem alterações não salvas. Deseja salvar antes de sair?")
+            resp = messagebox.askyesnocancel(
+                "Alterações Não Salvas",
+                f"Existem alterações não salvas no projeto atual. Deseja salvar antes de {acao_nome}?"
+            )
             if resp is None:
-                return
+                return False
             if resp is True:
-                self._salvar_projeto()
+                return self._salvar_projeto()
+        return True
+
+    def _ao_fechar_janela(self):
+        if not self._verificar_descarte_seguro("sair do sistema"):
+            return
         self.root.destroy()
 
     def _rotulo_valor_total(self):
@@ -1239,15 +1339,15 @@ class AppPesquisaMercado:
         frame_hub = ttk.Frame(self.container_principal, padding=40)
         frame_hub.place(relx=0.5, rely=0.5, anchor="center")
 
-        ttk.Label(frame_hub, text="SISTEMA DE PESQUISA DE MERCADO v7.0", font=("Segoe UI", 18, "bold"), foreground="#1f3c5b").pack(pady=(0, 5))
-        ttk.Label(frame_hub, text="Planilha SISDEA • KML/KMZ Google Earth • Mapa JPG • Homogeneização & Regressão", font=("Segoe UI", 10), foreground="#555555").pack(pady=(0, 30))
+        ttk.Label(frame_hub, text="SISTEMA DE PESQUISA DE MERCADO v7.1", font=("Segoe UI", 18, "bold"), foreground="#1f3c5b").pack(pady=(0, 5))
+        ttk.Label(frame_hub, text="Planilha SISDEA • Mapa Interativo • Mapa JPG Multi-Camadas • KML/KMZ • Regressão", font=("Segoe UI", 10), foreground="#555555").pack(pady=(0, 30))
 
-        ttk.Button(frame_hub, text="📄  Criar Novo Arquivo / Projeto", style="Hub.TButton", width=46, command=self._popup_escolha_modelo).pack(pady=7)
-        ttk.Button(frame_hub, text="📂  Carregar Projeto Existente (.json)", style="Hub.TButton", width=46, command=self._abrir_projeto_hub).pack(pady=7)
-        ttk.Button(frame_hub, text="📥  Importar Dados de Planilha (.xlsx)", style="Hub.TButton", width=46, command=self._importar_planilha_hub).pack(pady=7)
+        ttk.Button(frame_hub, text="📄  Criar Novo Arquivo / Projeto", style="Hub.TButton", width=48, command=self._popup_escolha_modelo).pack(pady=7)
+        ttk.Button(frame_hub, text="📂  Carregar Projeto Existente (.json)", style="Hub.TButton", width=48, command=self._abrir_projeto_hub).pack(pady=7)
+        ttk.Button(frame_hub, text="📥  Importar Dados de Planilha (.xlsx)", style="Hub.TButton", width=48, command=self._importar_planilha_hub).pack(pady=7)
         if os.path.exists(AUTOSAVE_FILE):
-            ttk.Button(frame_hub, text="🔄  Recuperar Sessão Anterior (Autosave)", style="Accent.TButton", width=46, command=self._carregar_autosave).pack(pady=7)
-        ttk.Button(frame_hub, text="🚪  Sair do Sistema", width=46, command=self._ao_fechar_janela).pack(pady=(20, 0))
+            ttk.Button(frame_hub, text="🔄  Recuperar Sessão Anterior (Autosave)", style="Accent.TButton", width=48, command=self._carregar_autosave).pack(pady=7)
+        ttk.Button(frame_hub, text="🚪  Sair do Sistema", width=48, command=self._ao_fechar_janela).pack(pady=(20, 0))
 
     def _carregar_autosave(self):
         try:
@@ -1261,9 +1361,8 @@ class AppPesquisaMercado:
             messagebox.showerror("Erro", f"Falha ao recuperar autosave: {e}")
 
     def _popup_escolha_modelo(self, callback_pos_confirmacao=None):
-        if self.dados_pesquisas and self.alteracoes_pendentes:
-            if not messagebox.askyesno("Novo Projeto", "Criar um novo projeto descartará os dados atuais da tela. Deseja continuar?"):
-                return
+        if not self._verificar_descarte_seguro("criar um novo projeto"):
+            return
 
         janela = tk.Toplevel(self.root)
         janela.title("Selecionar Modelo e Perfil Inicial")
@@ -1353,10 +1452,11 @@ class AppPesquisaMercado:
         menubar.add_cascade(label="Arquivo", menu=m_arq)
 
         m_geo = tk.Menu(menubar, tearoff=0)
+        m_geo.add_command(label="🌐 Abrir Mapa Interativo (Navegador + Fotos)...", command=self._abrir_mapa_interativo_html)
         m_geo.add_command(label="🌍 Gerar KML / KMZ (Google Earth com Fotos)...", command=self._exportar_kmz_kml)
         m_geo.add_command(label="🗺 Gerar Mapa JPG / PNG das Amostras...", command=self._janela_gerar_mapa_imagem)
         m_geo.add_separator()
-        m_geo.add_command(label="🌐 Conversor Lat/Long ↔ UTM...", command=self._janela_conversor_utm)
+        m_geo.add_command(label="🧭 Conversor Lat/Long ↔ UTM...", command=self._janela_conversor_utm)
         menubar.add_cascade(label="Geoprocessamento & Mapas", menu=m_geo)
 
         m_cfg = tk.Menu(menubar, tearoff=0)
@@ -1388,11 +1488,12 @@ class AppPesquisaMercado:
         ttk.Button(toolbar, text="📄 Word", style="Primary.TButton", command=self._iniciar_exportacao_word_thread).pack(side="right", padx=2)
         ttk.Button(toolbar, text="📊 Excel", style="Accent.TButton", command=self._exportar_excel).pack(side="right", padx=2)
         ttk.Button(toolbar, text="🗺 Mapa JPG", command=self._janela_gerar_mapa_imagem).pack(side="right", padx=2)
+        ttk.Button(toolbar, text="🌐 Mapa Interativo", command=self._abrir_mapa_interativo_html).pack(side="right", padx=2)
         ttk.Button(toolbar, text="🌍 KML/KMZ", command=self._exportar_kmz_kml).pack(side="right", padx=2)
-        ttk.Button(toolbar, text="📷 Mídia / Fotos", command=self._alternar_painel_lateral).pack(side="right", padx=4)
+        ttk.Button(toolbar, text="📷 Mídia", command=self._alternar_painel_lateral).pack(side="right", padx=3)
 
         self.lbl_info_mod = ttk.Label(toolbar, text="", font=("Segoe UI", 9, "bold"), foreground="#1f3c5b")
-        self.lbl_info_mod.pack(side="left", padx=6)
+        self.lbl_info_mod.pack(side="left", padx=4)
         self._atualizar_rotulo_topo()
 
         barra_fx = ttk.Frame(self.container_principal, padding=(8, 2))
@@ -1429,7 +1530,7 @@ class AppPesquisaMercado:
         self.sheet.popup_menu_add_command("➕ Adicionar 1 Dado", lambda: self._adicionar_dados_qtd(1))
         self.sheet.popup_menu_add_command("➕ Adicionar Vários Dados...", self._perguntar_qtd_adicionar_dados)
         self.sheet.popup_menu_add_command("📋 Extrair de Texto de Anúncio...", self._janela_extrator_anuncio)
-        self.sheet.popup_menu_add_command("🌐 Converter Lat/Long ➔ UTM...", self._janela_conversor_utm)
+        self.sheet.popup_menu_add_command("🧭 Converter Lat/Long ➔ UTM...", self._janela_conversor_utm)
         self.sheet.popup_menu_add_command("📋 Duplicar Linha Selecionada", self._duplicar_linha_selecionada)
         self.sheet.popup_menu_add_command("☑ Alternar Utilizado / Não Utilizado", self._alternar_utilizado_selecionado)
         self.sheet.popup_menu_add_command("⬇ Preencher Para Baixo (Ctrl+D)", self._preencher_para_baixo)
@@ -1506,7 +1607,6 @@ class AppPesquisaMercado:
         self._autosave()
 
     def _padronizar_unidades_clique(self):
-        """Padroniza a unidade de todas as linhas com conversão real de área (1 ha = 10.000 m²)."""
         self._commit_editor_ativo()
         alvo = "ha" if self.unidade_padrao_projeto == "m²" else "m²"
         if not self.dados_pesquisas:
@@ -1845,131 +1945,7 @@ class AppPesquisaMercado:
 
         janela = tk.Toplevel(self.root)
         janela.title(f"Pré-Análise SISDEA — NBR 14653 ({est['n']} amostras ativas • R$/{un_str})")
-        janela.geometry("980x670")
-        janela.transient(self.root)
-
-        nb = ttk.Notebook(janela)
-        nb.pack(fill="both", expand=True, padx=10, pady=8)
-
-        # === ABA 1: ESTATÍSTICA DESCRITIVA & BOXPLOT ===
-        tab_est = ttk.Frame(nb, padding=8)
-        nb.add(tab_est, text=" 1. Estatística & Boxplot ")
-
-        f_top = ttk.LabelFrame(tab_est, text=f" Resumo Estatístico da Amostra Bruta (R$/{un_str}) ", padding=10)
-        f_top.pack(fill="x", pady=4)
-
-        diag_cv = "Baixa dispersão (≤ 15%)" if est["cv"] <= 15 else ("Dispersão moderada (15%–30%)" if est["cv"] <= 30 else "Alta dispersão (> 30% — recomenda-se homogeneizar ou regredir)")
-        metricas = [
-            ("Amostras Ativas:", f"{est['n']}", "Mínimo / Máximo:", f"R$ {formatar_moeda_br(est['minimo'])}  /  R$ {formatar_moeda_br(est['maximo'])}"),
-            ("Média:", f"R$ {formatar_moeda_br(est['media'])}", "Desvio Padrão:", f"R$ {formatar_moeda_br(est['dp'])}"),
-            ("Mediana (Q2):", f"R$ {formatar_moeda_br(est['q2'])}", "Coef. Variação (CV):", f"{formatar_numero_br(est['cv'], 2)}% ({diag_cv})"),
-            ("Quartis (Q1 / Q3):", f"R$ {formatar_moeda_br(est['q1'])}  /  R$ {formatar_moeda_br(est['q3'])}", "IQR (Q3 - Q1):", f"R$ {formatar_moeda_br(est['iqr'])}"),
-            ("IC 80% Média (t-Student):", f"R$ {formatar_moeda_br(est['ic80_inf'])} a R$ {formatar_moeda_br(est['ic80_sup'])}", "Semi-amplitude IC 80%:", f"± {formatar_numero_br(est['amp_ic80_pct'] / 2.0, 2)}% (Total: {formatar_numero_br(est['amp_ic80_pct'], 2)}%)"),
-        ]
-        for idx, (k1, v1, k2, v2) in enumerate(metricas):
-            ttk.Label(f_top, text=k1, font=("Segoe UI", 9, "bold")).grid(row=idx, column=0, sticky="w", padx=6, pady=2)
-            ttk.Label(f_top, text=v1).grid(row=idx, column=1, sticky="w", padx=(2, 24), pady=2)
-            ttk.Label(f_top, text=k2, font=("Segoe UI", 9, "bold")).grid(row=idx, column=2, sticky="w", padx=6, pady=2)
-            ttk.Label(f_top, text=v2).grid(row=idx, column=3, sticky="w", padx=2, pady=2)
-
-        f_box = ttk.LabelFrame(tab_est, text=" Boxplot dos Valores Unitários ", padding=8)
-        f_box.pack(fill="x", pady=6)
-        canvas = tk.Canvas(f_box, height=135, bg="white", highlightthickness=1, highlightbackground="#cbd5e1")
-        canvas.pack(fill="x", expand=True)
-
-        w_c, pad_x, y_mid = 900, 55, 65
-        v_min_plot = min(est["minimo"], est["lim_inf_iqr"])
-        v_max_plot = max(est["maximo"], est["lim_sup_iqr"])
-        span = (v_max_plot - v_min_plot) or 1.0
-
-        def map_x(v):
-            return pad_x + ((v - v_min_plot) / span) * (w_c - 2 * pad_x)
-
-        x_q1, x_q2, x_q3 = map_x(est["q1"]), map_x(est["q2"]), map_x(est["q3"])
-        inliers = [v for v in unitarios if est["lim_inf_iqr"] <= v <= est["lim_sup_iqr"]]
-        w_low = min(inliers) if inliers else est["minimo"]
-        w_high = max(inliers) if inliers else est["maximo"]
-        x_wl, x_wh = map_x(w_low), map_x(w_high)
-
-        canvas.create_line(x_wl, y_mid, x_q1, y_mid, fill="#1f3c5b", width=2)
-        canvas.create_line(x_q3, y_mid, x_wh, y_mid, fill="#1f3c5b", width=2)
-        canvas.create_line(x_wl, y_mid - 14, x_wl, y_mid + 14, fill="#1f3c5b", width=2)
-        canvas.create_line(x_wh, y_mid - 14, x_wh, y_mid + 14, fill="#1f3c5b", width=2)
-        canvas.create_rectangle(x_q1, y_mid - 22, x_q3, y_mid + 22, fill="#dbeafe", outline="#1f3c5b", width=2)
-        canvas.create_line(x_q2, y_mid - 22, x_q2, y_mid + 22, fill="#b91c1c", width=3)
-        x_med = map_x(est["media"])
-        canvas.create_polygon(x_med, y_mid - 7, x_med + 7, y_mid, x_med, y_mid + 7, x_med - 7, y_mid, fill="#15803d", outline="#14532d")
-
-        for d in ativos:
-            v = d["unitario"]
-            if v < est["lim_inf_iqr"] or v > est["lim_sup_iqr"]:
-                xp = map_x(v)
-                canvas.create_oval(xp - 4, y_mid - 4, xp + 4, y_mid + 4, fill="#f59e0b", outline="#92400e")
-                canvas.create_text(xp, y_mid - 14, text=f"D.{d['dado_id']}", font=("Segoe UI", 7, "bold"), fill="#92400e")
-
-        canvas.create_text(x_wl, 112, text=f"Min: {formatar_moeda_br(w_low)}", font=("Segoe UI", 8), fill="#334155")
-        canvas.create_text(x_q2, 22, text=f"Mediana: {formatar_moeda_br(est['q2'])}", font=("Segoe UI", 8, "bold"), fill="#b91c1c")
-        canvas.create_text(x_wh, 112, text=f"Max: {formatar_moeda_br(w_high)}", font=("Segoe UI", 8), fill="#334155")
-
-        f_comp = ttk.LabelFrame(tab_est, text=" Diagnóstico de Pontos Atípicos (Outliers) ", padding=10)
-        f_comp.pack(fill="both", expand=True, pady=4)
-        ttk.Label(f_comp, text=f"• Critério ±30% da Média [R$ {formatar_moeda_br(est['lim_inf_30'])} a R$ {formatar_moeda_br(est['lim_sup_30'])}]:", font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        ttk.Label(f_comp, text="   " + (", ".join(out_30) if out_30 else "Nenhuma amostra fora da faixa."), wraplength=900).pack(anchor="w", pady=(0, 8))
-        ttk.Label(f_comp, text=f"• Critério IQR / Tukey (1,5 × IQR) [R$ {formatar_moeda_br(est['lim_inf_iqr'])} a R$ {formatar_moeda_br(est['lim_sup_iqr'])}]:", font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        ttk.Label(f_comp, text="   " + (", ".join(out_iqr) if out_iqr else "Nenhuma amostra fora da faixa."), wraplength=900).pack(anchor="w")
-
-        # === ABA 2: HOMOGENEIZAÇÃO POR FATORES (NBR 14653) ===
-        tab_hom = ttk.Frame(nb, padding=8)
-        nb.add(tab_hom, text=" 2. Homogeneização (NBR 14653) ")
-
-        f_par_hom = ttk.LabelFrame(tab_hom, text=" Parâmetros dos Fatores de Homogeneização (Editáveis) ", padding=8)
-        f_par_hom.pack(fill="x", pady=(0, 6))
-
-        areas_ativas = [d["area_terreno"] for d in ativos if d["area_terreno"] > 0]
-        area_med_padrao = statistics.median(areas_ativas) if areas_ativas else 1.0
-
-        ttk.Label(f_par_hom, text="Fator Oferta (p/ Condição = Oferta):").grid(row=0, column=0, sticky="w", padx=4, pady=2)
-        e_f_oferta = ttk.Entry(f_par_hom, width=8)
-        e_f_oferta.insert(0, "0,90")
-        e_f_oferta.grid(row=0, column=1, padx=(0, 14), pady=2)
-
-        ttk.Label(f_par_hom, text=f"Área Paradigma ({un_str}):").grid(row=0, column=2, sticky="w", padx=4, pady=2)
-        e_area_par = ttk.Entry(f_par_hom, width=12)
-        e_area_par.insert(0, formatar_numero_br(area_med_padrao, 4 if un_str == "ha" else 2))
-        e_area_par.grid(row=0, column=3, padx=(0, 14), pady=2)
-
-        ttk.Label(f_par_hom, text="Expoente Área (p):").grid(row=0, column=4, sticky="w", padx=4, pady=2)
-        e_exp_area = ttk.Entry(f_par_hom, width=8)
-        e_exp_area.insert(0, "0,00")
-        e_exp_area.grid(row=0, column=5, padx=(0, 14), pady=2)
-
-        var_usar_nota_hom = tk.BooleanVar(value=True)
-        ttk.Label(f_par_hom, text="Nota Agronômica Paradigma:").grid(row=1, column=0, sticky="w", padx=4, pady=2)
-        e_nota_par = ttk.Entry(f_par_hom, width=8)
-        e_nota_par.insert(0, "1,00")
-        e_nota_par.grid(row=1, column=1, padx=(0, 14), pady=2)
-    # --- PRÉ-ANÁLISE SISDEA (ESTATÍSTICA + HOMOGENEIZAÇÃO + REGRESSÃO LINEAR MÚLTIPLA) ---
-    def _janela_analise_estatistica(self):
-        self._commit_editor_ativo()
-        ativos = [d for d in self.dados_pesquisas if d.get("utilizado", True) and d.get("unitario", 0.0) > 0]
-        if len(ativos) < 2:
-            messagebox.showinfo("Pré-Análise SISDEA", "É necessário pelo menos 2 amostras ativas com unitário válido.")
-            return
-        unidades = {d.get("unidade", self.unidade_padrao_projeto) for d in ativos}
-        if len(unidades) > 1:
-            messagebox.showwarning("Unidades Mistas", "Padronize as unidades antes de abrir a Pré-Análise SISDEA.")
-            return
-
-        un_str = next(iter(unidades))
-        unitarios = [d["unitario"] for d in ativos]
-        est = calcular_estatisticas_completas(unitarios)
-
-        out_30 = [f"D.{d['dado_id']} (R$ {formatar_moeda_br(d['unitario'])})" for d in ativos if self._eh_outlier(d["unitario"], est, "30%")]
-        out_iqr = [f"D.{d['dado_id']} (R$ {formatar_moeda_br(d['unitario'])})" for d in ativos if self._eh_outlier(d["unitario"], est, "IQR")]
-
-        janela = tk.Toplevel(self.root)
-        janela.title(f"Pré-Análise SISDEA — NBR 14653 ({est['n']} amostras ativas • R$/{un_str})")
-        janela.geometry("980x670")
+        janela.geometry("1020x690")
         janela.transient(self.root)
 
         nb = ttk.Notebook(janela)
@@ -2005,7 +1981,7 @@ class AppPesquisaMercado:
         canvas = tk.Canvas(f_box, height=135, bg="white", highlightthickness=1, highlightbackground="#cbd5e1")
         canvas.pack(fill="x", expand=True)
 
-        w_c, pad_x, y_mid = 900, 55, 65
+        w_c, pad_x, y_mid = 940, 55, 65
         v_min_plot = min(est["minimo"], est["lim_inf_iqr"])
         v_max_plot = max(est["maximo"], est["lim_sup_iqr"])
         span = (v_max_plot - v_min_plot) or 1.0
@@ -2042,15 +2018,15 @@ class AppPesquisaMercado:
         f_comp = ttk.LabelFrame(tab_est, text=" Diagnóstico de Pontos Atípicos (Outliers) ", padding=10)
         f_comp.pack(fill="both", expand=True, pady=4)
         ttk.Label(f_comp, text=f"• Critério ±30% da Média [R$ {formatar_moeda_br(est['lim_inf_30'])} a R$ {formatar_moeda_br(est['lim_sup_30'])}]:", font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        ttk.Label(f_comp, text="   " + (", ".join(out_30) if out_30 else "Nenhuma amostra fora da faixa."), wraplength=900).pack(anchor="w", pady=(0, 8))
+        ttk.Label(f_comp, text="   " + (", ".join(out_30) if out_30 else "Nenhuma amostra fora da faixa."), wraplength=940).pack(anchor="w", pady=(0, 8))
         ttk.Label(f_comp, text=f"• Critério IQR / Tukey (1,5 × IQR) [R$ {formatar_moeda_br(est['lim_inf_iqr'])} a R$ {formatar_moeda_br(est['lim_sup_iqr'])}]:", font=("Segoe UI", 9, "bold")).pack(anchor="w")
-        ttk.Label(f_comp, text="   " + (", ".join(out_iqr) if out_iqr else "Nenhuma amostra fora da faixa."), wraplength=900).pack(anchor="w")
+        ttk.Label(f_comp, text="   " + (", ".join(out_iqr) if out_iqr else "Nenhuma amostra fora da faixa."), wraplength=940).pack(anchor="w")
 
         # === ABA 2: HOMOGENEIZAÇÃO POR FATORES (NBR 14653) ===
         tab_hom = ttk.Frame(nb, padding=8)
         nb.add(tab_hom, text=" 2. Homogeneização (NBR 14653) ")
 
-        f_par_hom = ttk.LabelFrame(tab_hom, text=" Parâmetros dos Fatores de Homogeneização (Editáveis) ", padding=8)
+        f_par_hom = ttk.LabelFrame(tab_hom, text=" Parâmetros dos Fatores de Homogeneização (Validação Estrita) ", padding=8)
         f_par_hom.pack(fill="x", pady=(0, 6))
 
         areas_ativas = [d["area_terreno"] for d in ativos if d["area_terreno"] > 0]
@@ -2095,15 +2071,34 @@ class AppPesquisaMercado:
 
         resultados_hom_cache = []
 
-        def recalcular_homogeneizacao():
+        def recalcular_homogeneizacao(mostrar_alerta=True):
+            f_of_cfg, ok_of = converter_para_float_validado(e_f_oferta.get(), False)
+            if not ok_of or not (0.10 <= f_of_cfg <= 2.00):
+                if mostrar_alerta:
+                    messagebox.showerror("Parâmetro Inválido", "O 'Fator Oferta' deve ser um número válido entre 0,10 e 2,00.", parent=janela)
+                return
+
+            a_par, ok_ap = converter_para_float_validado(e_area_par.get(), permitir_milhar_ponto=(un_str != "ha"))
+            if not ok_ap or a_par <= 0:
+                if mostrar_alerta:
+                    messagebox.showerror("Parâmetro Inválido", "A 'Área Paradigma' deve ser um número maior que zero.", parent=janela)
+                return
+
+            exp_p, ok_exp = converter_para_float_validado(e_exp_area.get(), False)
+            if not ok_exp or not (-2.0 <= exp_p <= 2.0):
+                if mostrar_alerta:
+                    messagebox.showerror("Parâmetro Inválido", "O 'Expoente Área (p)' deve ser um número válido (ex: 0,00 ou 0,125).", parent=janela)
+                return
+
+            n_par, ok_np = converter_para_float_validado(e_nota_par.get(), False)
+            if not ok_np or not (0.01 <= n_par <= 10.0):
+                if mostrar_alerta:
+                    messagebox.showerror("Parâmetro Inválido", "A 'Nota Agronômica Paradigma' deve ser um número maior que zero (ex: 1,00).", parent=janela)
+                return
+
             for item in tree_hom.get_children():
                 tree_hom.delete(item)
             resultados_hom_cache.clear()
-
-            f_of_cfg = converter_para_float(e_f_oferta.get(), False) or 1.0
-            a_par = converter_para_float(e_area_par.get(), permitir_milhar_ponto=(un_str != "ha"))
-            exp_p = converter_para_float(e_exp_area.get(), False)
-            n_par = converter_para_float(e_nota_par.get(), False) or 1.0
 
             q_homs, fatores_tot = [], []
             for d in ativos:
@@ -2115,7 +2110,7 @@ class AppPesquisaMercado:
                     if "condi" in kl:
                         cond_txt = str(v).lower()
                     elif kl.startswith("nota agro"):
-                        nota_val = converter_para_float(v, False)
+                        nota_val, _ = converter_para_float_validado(v, False)
 
                 f_of = 1.0 if "transa" in cond_txt else f_of_cfg
                 a_i = d["area_terreno"]
@@ -2175,10 +2170,10 @@ class AppPesquisaMercado:
 
         f_btns_h = ttk.Frame(f_par_hom)
         f_btns_h.grid(row=0, column=6, rowspan=2, padx=8)
-        ttk.Button(f_btns_h, text="🔄 Recalcular", style="Primary.TButton", command=recalcular_homogeneizacao).pack(fill="x", pady=2)
+        ttk.Button(f_btns_h, text="🔄 Recalcular", style="Primary.TButton", command=lambda: recalcular_homogeneizacao(True)).pack(fill="x", pady=2)
         ttk.Button(f_btns_h, text="📊 Exportar Excel", command=exportar_hom_excel).pack(fill="x", pady=2)
 
-        recalcular_homogeneizacao()
+        recalcular_homogeneizacao(False)
 
         # === ABA 3: REGRESSÃO LINEAR MÚLTIPLA (PRÉ-ANÁLISE SISDEA) ===
         tab_reg = ttk.Frame(nb, padding=8)
@@ -2200,7 +2195,7 @@ class AppPesquisaMercado:
             candidatas_x.append((v_cfg["nome"], f"var_{v_cfg['nome']}"))
 
         f_vars_x = ttk.Frame(f_cfg_reg)
-        f_vars_x.grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 2))
+        f_vars_x.grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 2))
         ttk.Label(f_vars_x, text="Variáveis Explicativas (X):", font=("Segoe UI", 9, "bold")).pack(side="left", padx=(4, 8))
 
         vars_x_checks = []
@@ -2216,19 +2211,20 @@ class AppPesquisaMercado:
             ttk.Checkbutton(f_item, text="ln", variable=v_ln).pack(side="left")
             vars_x_checks.append((nome_c, chave_c, v_chk, v_ln))
 
-        lbl_kpi_reg = tk.Label(tab_reg, text="", bg="#e1e7ef", fg="#1f3c5b", font=("Segoe UI", 9, "bold"), anchor="w", padx=10, pady=5, relief="solid", bd=1)
+        lbl_kpi_reg = tk.Label(tab_reg, text="", bg="#e1e7ef", fg="#1f3c5b", font=("Segoe UI", 9, "bold"), justify="left", anchor="w", padx=10, pady=5, relief="solid", bd=1)
         lbl_kpi_reg.pack(fill="x", pady=3)
 
         pane_reg = ttk.PanedWindow(tab_reg, orient="vertical")
         pane_reg.pack(fill="both", expand=True, pady=2)
 
-        f_coef = ttk.LabelFrame(pane_reg, text=" Significância dos Regressores (Teste t de Student — NBR 14653-2) ", padding=4)
+        f_coef = ttk.LabelFrame(pane_reg, text=" Significância dos Regressores (Escala Transformada — Teste t & Multicolinearidade VIF) ", padding=4)
         pane_reg.add(f_coef, weight=1)
-        cols_coef = ("var", "beta", "se", "t", "pval", "r", "diag")
+        cols_coef = ("var", "beta", "se", "t", "pval", "r", "vif", "diag")
         tree_coef = ttk.Treeview(f_coef, columns=cols_coef, show="headings", height=5)
         for cid, ctxt, cw in [
-            ("var", "Variável", 175), ("beta", "Coeficiente (β)", 115), ("se", "Erro Padrão", 105),
-            ("t", "Estatística t", 90), ("pval", "p-valor", 85), ("r", "Correl. r", 85), ("diag", "Enquadramento NBR 14653", 210)
+            ("var", "Variável", 165), ("beta", "Coeficiente (β)", 105), ("se", "Erro Padrão", 95),
+            ("t", "Estatística t", 82), ("pval", "p-valor", 75), ("r", "Correl. r", 75),
+            ("vif", "VIF", 65), ("diag", "Enquadramento NBR 14653", 220)
         ]:
             tree_coef.heading(cid, text=ctxt)
             tree_coef.column(cid, width=cw, anchor="center" if cid not in ("var", "diag") else "w")
@@ -2237,7 +2233,7 @@ class AppPesquisaMercado:
         f_res_sim = ttk.Frame(pane_reg)
         pane_reg.add(f_res_sim, weight=1)
 
-        f_res = ttk.LabelFrame(f_res_sim, text=" Resíduos e Pontos Influenciantes (Outliers |z| > 2,0) ", padding=4)
+        f_res = ttk.LabelFrame(f_res_sim, text=" Resíduos e Pontos Influenciantes (Escala Original — Outliers |z| > 2,0) ", padding=4)
         f_res.pack(side="left", fill="both", expand=True, padx=(0, 6))
         cols_res = ("id", "obs", "est", "err", "z", "st")
         tree_res = ttk.Treeview(f_res, columns=cols_res, show="headings", height=6)
@@ -2263,7 +2259,10 @@ class AppPesquisaMercado:
             x_vec = [1.0]
             for ch in modelo_reg_atual["chaves"]:
                 ent = entradas_sim.get(ch)
-                val_x = converter_para_float(ent.get() if ent else "0", permitir_milhar_ponto=True)
+                val_x, ok_x = converter_para_float_validado(ent.get() if ent else "0", permitir_milhar_ponto=True)
+                if not ok_x:
+                    messagebox.showwarning("Simulador", "Valor numérico inválido no simulador.", parent=janela)
+                    return
                 if ch in modelo_reg_atual["transf_x_log"]:
                     if val_x <= 0:
                         messagebox.showwarning("Simulador", "Variáveis em ln(X) exigem valor > 0.", parent=janela)
@@ -2272,15 +2271,22 @@ class AppPesquisaMercado:
                 x_vec.append(val_x)
             yh = sum(mod["betas"][j] * x_vec[j] for j in range(len(x_vec)))
             if mod["transf_y"] == "LN":
-                q_av = math.exp(yh)
+                q_mediana = math.exp(yh)
+                q_av = q_mediana * mod["fator_vies_ln"]
+                det_ln = f"\n(Mediana: R$ {formatar_moeda_br(q_mediana)} | Viés: ×{mod['fator_vies_ln']:.4f})"
             elif mod["transf_y"] == "INV":
-                q_av = (1.0 / yh) if yh != 0 else 0.0
+                if yh <= 1e-12:
+                    lbl_out.config(text="Fora do domínio:\nŷ transformado ≤ 0")
+                    return
+                q_av = 1.0 / yh
+                det_ln = ""
             else:
                 q_av = yh
+                det_ln = ""
             area_av = converter_para_float(entradas_sim["area_terreno"].get(), permitir_milhar_ponto=(un_str != "ha")) if "area_terreno" in entradas_sim else 0.0
             tot_av = q_av * area_av
             txt_tot = f"\nValor Total: R$ {formatar_moeda_br(tot_av)}" if area_av > 0 else ""
-            lbl_out.config(text=f"Unitário Estimado:\nR$ {formatar_moeda_br(q_av)}/{un_str}{txt_tot}")
+            lbl_out.config(text=f"Unitário Estimado:\nR$ {formatar_moeda_br(q_av)}/{un_str}{txt_tot}{det_ln}")
 
         def rodar_regressao():
             for item in tree_coef.get_children():
@@ -2310,38 +2316,51 @@ class AppPesquisaMercado:
             modelo_reg_atual["transf_x_log"] = logs_sel
 
             qtd_out_res = sum(1 for r in res_reg["detalhes_amostras"] if r["outlier"])
+            escala_lbl = {"LN": "ln(Y)", "INV": "1/Y", "LIN": "Y (Linear)"}[res_reg["transf_y"]]
+            alerta_vif = f"  •  ⚠ Colinearidade Alta (VIF máx: {res_reg['max_vif']:.1f})" if res_reg["max_vif"] > 10.0 else ""
             lbl_kpi_reg.config(
                 text=(
-                    f"📈 n = {res_reg['n']}  •  R = {formatar_numero_br(res_reg['r'], 4)}  •  "
+                    f"📈 Escala {escala_lbl}: n = {res_reg['n']}  •  R = {formatar_numero_br(res_reg['r'], 4)}  •  "
                     f"R² = {formatar_numero_br(res_reg['r2'] * 100, 2)}%  •  R² Ajustado = {formatar_numero_br(res_reg['r2_adj'] * 100, 2)}%  •  "
-                    f"F = {formatar_numero_br(res_reg['f_stat'], 2)}  •  Outliers de Resíduo (|z|>2): {qtd_out_res}"
+                    f"F = {formatar_numero_br(res_reg['f_stat'], 2)}  •  Outliers (|z|>2): {qtd_out_res}{alerta_vif}"
                 ),
                 fg="#1f3c5b"
             )
 
             for reg in res_reg["regressores"]:
                 pv = reg["p_valor"]
+                vif_val = reg["vif"]
+                vif_txt = "—" if vif_val is None else ("∞" if math.isinf(vif_val) else f"{vif_val:.2f}")
                 if reg["nome"].startswith("Intercepto"):
                     diag = "Termo independente"
-                elif pv <= 0.10:
-                    diag = "✔ Grau III (p ≤ 10%)"
-                elif pv <= 0.20:
-                    diag = "✔ Grau II (p ≤ 20%)"
-                elif pv <= 0.30:
-                    diag = "⚠ Grau I (p ≤ 30%)"
                 else:
-                    diag = "✖ Não significante (p > 30%)"
+                    if pv <= 0.10:
+                        diag = "✔ Grau III (p ≤ 10%)"
+                    elif pv <= 0.20:
+                        diag = "✔ Grau II (p ≤ 20%)"
+                    elif pv <= 0.30:
+                        diag = "⚠ Grau I (p ≤ 30%)"
+                    else:
+                        diag = "✖ Não signif. (p > 30%)"
+                    if vif_val is not None and vif_val > 10.0:
+                        diag += " [VIF>10]"
                 tree_coef.insert("", "end", values=(
                     reg["nome"], f"{reg['beta']:.6f}", f"{reg['se']:.6f}",
-                    f"{reg['t']:.3f}", f"{pv * 100:.2f}%", f"{reg['r_simples']:.3f}", diag
+                    f"{reg['t']:.3f}", f"{pv * 100:.2f}%", f"{reg['r_simples']:.3f}", vif_txt, diag
                 ))
 
             for det in res_reg["detalhes_amostras"]:
-                st_r = "⚠ Outlier (|z|>2)" if det["outlier"] else "✔ Normal"
+                if det["fora_dominio"]:
+                    est_str = "Fora domínio (ŷ≤0)"
+                    err_str = "—"
+                    st_r = "⚠ Inválido (1/ŷ)"
+                else:
+                    est_str = f"R$ {formatar_moeda_br(det['q_est'])}"
+                    err_str = f"{det['erro_pct']:+.1f}%"
+                    st_r = "⚠ Outlier (|z|>2)" if det["outlier"] else "✔ Normal"
                 tree_res.insert("", "end", values=(
                     f"D.{det['dado_id']}", f"R$ {formatar_moeda_br(det['q_obs'])}",
-                    f"R$ {formatar_moeda_br(det['q_est'])}", f"{det['erro_pct']:+.1f}%",
-                    f"{det['z_res']:+.2f}", st_r
+                    est_str, err_str, f"{det['z_res']:+.2f}", st_r
                 ))
 
             for w in f_sim.winfo_children():
@@ -2356,7 +2375,7 @@ class AppPesquisaMercado:
                 e_s.grid(row=r_i, column=1, padx=4, pady=2)
                 entradas_sim[ch_s] = e_s
             ttk.Button(f_sim, text="Calcular Avaliação", style="Accent.TButton", command=calcular_simulacao).grid(row=len(chaves_sel), column=0, columnspan=2, pady=6)
-            lbl_sim_out = tk.Label(f_sim, text="Unitário Estimado:\nR$ 0,00", bg="#eef2f6", fg="#1f3c5b", font=("Segoe UI", 9, "bold"), width=28, pady=8, relief="groove")
+            lbl_sim_out = tk.Label(f_sim, text="Unitário Estimado:\nR$ 0,00", bg="#eef2f6", fg="#1f3c5b", font=("Segoe UI", 8, "bold"), width=32, pady=8, relief="groove")
             lbl_sim_out.grid(row=len(chaves_sel) + 1, column=0, columnspan=2, pady=2)
             sim_ui["lbl"] = lbl_sim_out
             calcular_simulacao()
@@ -2405,6 +2424,182 @@ class AppPesquisaMercado:
         self.root.clipboard_clear()
         self.root.clipboard_append("\n".join(linhas))
         messagebox.showinfo("Copiado", f"{len(self.dados_pesquisas)} linhas copiadas! Basta colar (Ctrl+V) no Excel ou SISDEA.")
+
+    # --- MAPA INTERATIVO HTML (LEAFLET NO NAVEGADOR COM FOTOS, CAMADAS E FILTROS) ---
+    def _abrir_mapa_interativo_html(self):
+        self._commit_editor_ativo()
+        pontos = []
+        for d in self.dados_pesquisas:
+            lat, lon = utm_para_latlon(d.get("zona_utm", "22K"), d.get("coord_e", ""), d.get("coord_s", ""))
+            if lat is not None and lon is not None:
+                pontos.append((d, lat, lon))
+
+        if not pontos:
+            messagebox.showwarning("Mapa Interativo", "Nenhuma amostra possui coordenadas UTM válidas (Coord. E e Coord. S).")
+            return
+
+        marcadores_js = []
+        for d, lat, lon in pontos:
+            d_id = d["dado_id"]
+            un = d.get("unidade", self.unidade_padrao_projeto)
+            casas = 4 if un == "ha" else 2
+            ativo = bool(d.get("utilizado", True))
+
+            foto_b64_html = ""
+            for cf in ("foto1", "foto2"):
+                src = d.get(cf, "")
+                if not src:
+                    continue
+                stream = self._baixar_imagem(src)
+                if stream:
+                    b64 = base64.b64encode(stream.getvalue()).decode("ascii")
+                    foto_b64_html += f'<img src="data:image/jpeg;base64,{b64}" style="width:100%;max-height:160px;object-fit:cover;border-radius:6px;margin:6px 0;border:1px solid #cbd5e1;"/>'
+
+            link_html = ""
+            lk = d.get("link", "").strip()
+            if lk:
+                href = lk if lk.startswith(("http://", "https://")) else f"https://{lk}"
+                link_html = f'<div style="margin-top:6px;"><a href="{xml_escape(href)}" target="_blank" style="color:#1d4ed8;font-weight:bold;text-decoration:none;">🔗 Abrir Anúncio Original</a></div>'
+
+            extras_html = ""
+            for v_cfg in self.variaveis_config:
+                vv = d.get("variaveis_extras", {}).get(v_cfg["nome"], "")
+                if vv:
+                    extras_html += f"<div><b>{xml_escape(v_cfg['nome'])}:</b> {xml_escape(vv)}</div>"
+
+            popup_html = (
+                f'<div style="font-family:Segoe UI,Arial,sans-serif;font-size:12px;width:290px;color:#1e293b;">'
+                f'<div style="background:{"#1f3c5b" if ativo else "#64748b"};color:#fff;padding:6px 10px;border-radius:6px 6px 0 0;font-weight:bold;">'
+                f'Pesquisa {d_id:02d}{"" if ativo else " (Descartada)"}</div>'
+                f'<div style="padding:8px;border:1px solid #cbd5e1;border-top:none;border-radius:0 0 6px 6px;">'
+                f'{foto_b64_html}'
+                f'<div><b>Logradouro:</b> {xml_escape(d.get("endereco", ""))}</div>'
+                f'<div><b>Município:</b> {xml_escape(d.get("municipio", ""))}</div>'
+                f'<div><b>Área:</b> {formatar_numero_br(d.get("area_terreno", 0.0), casas)} {xml_escape(un)}</div>'
+                f'<div><b>Valor:</b> R$ {formatar_moeda_br(d.get("valor_total", 0.0))}</div>'
+                f'<div><b>Unitário:</b> <span style="color:#0f766e;font-weight:bold;">R$ {formatar_moeda_br(d.get("unitario", 0.0))}/{xml_escape(un)}</span></div>'
+                f'{extras_html}'
+                f'<div style="color:#64748b;font-size:11px;margin-top:4px;">UTM: {xml_escape(d.get("zona_utm", ""))} {xml_escape(d.get("coord_e", ""))} E / {xml_escape(d.get("coord_s", ""))} S</div>'
+                f'{link_html}</div></div>'
+            )
+
+            marcadores_js.append({
+                "id": d_id,
+                "label": f"D.{d_id:02d}",
+                "lat": lat,
+                "lon": lon,
+                "ativo": ativo,
+                "municipio": d.get("municipio", ""),
+                "unitario": f"R$ {formatar_moeda_br(d.get('unitario', 0.0))}/{un}",
+                "popup": popup_html
+            })
+
+        html_path = os.path.join(CONFIG_DIR, "mapa_interativo_enprol.html")
+        dados_json_js = json.dumps(marcadores_js, ensure_ascii=False)
+
+        html_doc = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<title>ENPROL - Mapa Interativo de Pesquisa de Mercado</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body {{ margin:0; padding:0; font-family:'Segoe UI',Arial,sans-serif; display:flex; height:100vh; }}
+  #sidebar {{ width:320px; background:#f8fafc; border-right:1px solid #cbd5e1; display:flex; flex-direction:column; }}
+  #header {{ background:#1f3c5b; color:#fff; padding:14px; }}
+  #header h2 {{ margin:0 0 4px 0; font-size:15px; }}
+  #header p {{ margin:0; font-size:12px; color:#cbd5e1; }}
+  #controls {{ padding:10px; border-bottom:1px solid #e2e8f0; background:#eef2f6; font-size:12px; }}
+  #lista {{ flex:1; overflow-y:auto; padding:8px; }}
+  .card {{ background:#fff; border:1px solid #cbd5e1; border-radius:6px; padding:8px 10px; margin-bottom:6px; cursor:pointer; transition:0.15s; }}
+  .card:hover {{ border-color:#1f3c5b; background:#f1f5f9; }}
+  .card-title {{ font-weight:bold; color:#1f3c5b; font-size:13px; }}
+  .card-sub {{ font-size:12px; color:#475569; margin-top:2px; }}
+  #map {{ flex:1; }}
+  .pin-label {{ background:#facc15; border:2px solid #78350f; border-radius:50%; color:#1e293b; font-weight:bold; font-size:11px; text-align:center; line-height:22px; box-shadow:0 2px 5px rgba(0,0,0,0.35); }}
+  .pin-off {{ background:#cbd5e1; border:2px solid #475569; border-radius:50%; color:#334155; font-weight:bold; font-size:11px; text-align:center; line-height:22px; }}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <div id="header">
+    <h2>ENPROL • Mapa de Amostras</h2>
+    <p>{len(pontos)} amostra(s) georreferenciada(s) • {data_hoje_br()}</p>
+  </div>
+  <div id="controls">
+    <label><input type="checkbox" id="chkAtivos" checked onchange="filtrar()"> Mostrar Utilizadas (☑)</label><br/>
+    <label><input type="checkbox" id="chkInativos" checked onchange="filtrar()"> Mostrar Descartadas (☐)</label>
+  </div>
+  <div id="lista"></div>
+</div>
+<div id="map"></div>
+<script>
+const pontos = {dados_json_js};
+const osm = L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{ maxZoom: 19, attribution: '© OpenStreetMap' }});
+const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 19, attribution: '© Esri Satellite' }});
+const rotulos = L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{{z}}/{{y}}/{{x}}', {{ maxZoom: 19 }});
+const hibrido = L.layerGroup([sat, rotulos]);
+const topo = L.tileLayer('https://{{s}}.tile.opentopomap.org/{{z}}/{{x}}/{{y}}.png', {{ maxZoom: 17, attribution: '© OpenTopoMap' }});
+const limpo = L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{ maxZoom: 19, attribution: '© CartoDB' }});
+
+const map = L.map('map', {{ layers: [osm] }});
+L.control.layers({{
+  "Mapa de Ruas (OSM)": osm,
+  "Satélite (Esri)": sat,
+  "Híbrido (Satélite + Ruas)": hibrido,
+  "Topográfico / Relevo": topo,
+  "Limpo para Laudo (Carto)": limpo
+}}).addTo(map);
+L.control.scale({{ imperial: false }}).addTo(map);
+
+const markers = [];
+const bounds = [];
+const listaDiv = document.getElementById('lista');
+
+pontos.forEach(p => {{
+  const icon = L.divIcon({{
+    className: p.ativo ? 'pin-label' : 'pin-off',
+    html: p.id,
+    iconSize: [26, 26],
+    iconAnchor: [13, 13]
+  }});
+  const m = L.marker([p.lat, p.lon], {{ icon: icon }}).bindPopup(p.popup, {{ maxWidth: 320 }});
+  m.addTo(map);
+  markers.push({{ data: p, marker: m }});
+  bounds.push([p.lat, p.lon]);
+
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.id = 'card_' + p.id;
+  card.innerHTML = `<div class="card-title">${{p.label}} • ${{p.municipio || 'Sem município'}}</div><div class="card-sub">${{p.unitario}} ${{p.ativo ? '' : '(Descartada)'}}</div>`;
+  card.onclick = () => {{ map.setView([p.lat, p.lon], 16); m.openPopup(); }};
+  listaDiv.appendChild(card);
+}});
+
+if (bounds.length > 0) map.fitBounds(bounds, {{ padding: [45, 45] }});
+
+function filtrar() {{
+  const showA = document.getElementById('chkAtivos').checked;
+  const showI = document.getElementById('chkInativos').checked;
+  markers.forEach(obj => {{
+    const vis = obj.data.ativo ? showA : showI;
+    const card = document.getElementById('card_' + obj.data.id);
+    if (vis) {{ obj.marker.addTo(map); card.style.display = 'block'; }}
+    else {{ map.removeLayer(obj.marker); card.style.display = 'none'; }}
+  }});
+}}
+</script>
+</body>
+</html>"""
+
+        try:
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_doc)
+            webbrowser.open(f"file:///{os.path.abspath(html_path).replace(os.sep, '/')}")
+        except Exception as e:
+            messagebox.showerror("Erro ao Abrir Mapa Interativo", str(e))
 
     # --- EXPORTAÇÃO KML / KMZ (GOOGLE EARTH COM ALFINETE AMARELO, LINK E FOTO) ---
     def _exportar_kmz_kml(self):
@@ -2559,7 +2754,28 @@ class AppPesquisaMercado:
         except Exception as e:
             messagebox.showerror("Erro ao Gerar KML/KMZ", str(e))
 
-    # --- GERADOR DE MAPA JPG / PNG DAS AMOSTRAS ---
+    # --- GERADOR DE MAPA JPG / PNG TURBINADO (CACHE + DOWNLOAD PARALELO + 6 CAMADAS + LEGENDA COMPLETA) ---
+    def _baixar_tile_com_cache(self, camada_id, url_t):
+        chave_hash = hashlib.md5(f"{camada_id}_{url_t}".encode("utf-8")).hexdigest()
+        arq_cache = os.path.join(TILES_CACHE_DIR, f"{chave_hash}.png")
+        if os.path.exists(arq_cache):
+            try:
+                return Image.open(arq_cache).convert("RGBA")
+            except Exception:
+                pass
+        try:
+            r_t = requests.get(url_t, headers={"User-Agent": "ENPROL-PesquisaMercado/7.1"}, timeout=4)
+            if r_t.status_code == 200:
+                im = Image.open(io.BytesIO(r_t.content)).convert("RGBA")
+                try:
+                    im.save(arq_cache, "PNG")
+                except Exception:
+                    pass
+                return im
+        except Exception:
+            pass
+        return None
+
     def _janela_gerar_mapa_imagem(self):
         self._commit_editor_ativo()
         pontos = []
@@ -2574,21 +2790,30 @@ class AppPesquisaMercado:
 
         janela = tk.Toplevel(self.root)
         janela.title(f"Gerar Mapa de Localização das Amostras ({len(pontos)} pontos)")
-        janela.geometry("920x660")
+        janela.geometry("980x690")
         janela.transient(self.root)
 
         f_ctrl = ttk.Frame(janela, padding=8)
         f_ctrl.pack(fill="x")
 
         ttk.Label(f_ctrl, text="Título do Mapa:", font=("Segoe UI", 9, "bold")).pack(side="left")
-        e_tit_mapa = ttk.Entry(f_ctrl, width=34)
+        e_tit_mapa = ttk.Entry(f_ctrl, width=30)
         e_tit_mapa.insert(0, "MAPA DE LOCALIZAÇÃO DAS AMOSTRAS")
-        e_tit_mapa.pack(side="left", padx=(4, 12))
+        e_tit_mapa.pack(side="left", padx=(4, 10))
 
-        ttk.Label(f_ctrl, text="Estilo:").pack(side="left")
-        cb_estilo = ttk.Combobox(f_ctrl, values=["Mapa de Ruas (OSM)", "Satélite (Esri)", "Esquemático Offline"], width=20, state="readonly")
+        camadas_disp = [
+            "Mapa de Ruas (OSM)",
+            "Satélite (Esri)",
+            "Híbrido (Satélite + Ruas)",
+            "Topográfico / Relevo",
+            "Limpo para Laudo (Carto)",
+            "Esquemático Offline"
+        ]
+        ttk.Label(f_ctrl, text="Camada:").pack(side="left")
+        cb_estilo = ttk.Combobox(f_ctrl, values=camadas_disp, width=23, state="readonly")
         cb_estilo.current(0)
-        cb_estilo.pack(side="left", padx=(4, 12))
+        cb_estilo.pack(side="left", padx=(4, 10))
+        cb_estilo.bind("<<ComboboxSelected>>", lambda e: disparar_render_async())
 
         lbl_mapa = tk.Label(janela, text="Gerando prévia do mapa...", bg="#e2e8f0")
         lbl_mapa.pack(fill="both", expand=True, padx=10, pady=4)
@@ -2596,8 +2821,9 @@ class AppPesquisaMercado:
         imagem_final_holder = {"img": None}
 
         def renderizar_mapa_pil(estilo_sel, titulo_txt):
-            W, H = 1280, 820
-            leg_w = 340
+            W, H = 1360, 860
+            duas_colunas_leg = len(pontos) > 25
+            leg_w = 460 if duas_colunas_leg else 340
             map_w = W - leg_w - 40
             map_h = H - 110
             map_x0, map_y0 = 20, 65
@@ -2607,8 +2833,8 @@ class AppPesquisaMercado:
             lat_min, lat_max = min(lats), max(lats)
             lon_min, lon_max = min(lons), max(lons)
 
-            d_lat = max((lat_max - lat_min) * 0.25, 0.008)
-            d_lon = max((lon_max - lon_min) * 0.25, 0.008)
+            d_lat = max((lat_max - lat_min) * 0.28, 0.008)
+            d_lon = max((lon_max - lon_min) * 0.28, 0.008)
             lat_min -= d_lat
             lat_max += d_lat
             lon_min -= d_lon
@@ -2625,7 +2851,7 @@ class AppPesquisaMercado:
             for z_try in range(17, 4, -1):
                 x1, y1 = latlon_to_global_px(lat_max, lon_min, z_try)
                 x2, y2 = latlon_to_global_px(lat_min, lon_max, z_try)
-                if (x2 - x1) <= map_w * 0.88 and (y2 - y1) <= map_h * 0.88:
+                if (x2 - x1) <= map_w * 0.84 and (y2 - y1) <= map_h * 0.84:
                     zoom = z_try
                     break
 
@@ -2638,7 +2864,7 @@ class AppPesquisaMercado:
             canvas_img = Image.new("RGB", (W, H), (244, 246, 249))
             draw = ImageDraw.Draw(canvas_img)
 
-            mapa_base = Image.new("RGB", (map_w, map_h), (235, 240, 245))
+            mapa_base = Image.new("RGBA", (map_w, map_h), (235, 240, 245, 255))
             tiles_ok = 0
 
             if "Offline" not in estilo_sel:
@@ -2647,39 +2873,60 @@ class AppPesquisaMercado:
                 ty_min = int(math.floor(gy0 / 256.0))
                 ty_max = int(math.floor((gy0 + map_h) / 256.0))
                 max_t = (2 ** zoom) - 1
-                headers_http = {"User-Agent": "ENPROL-PesquisaMercado/7.0"}
 
-                if (tx_max - tx_min + 1) * (ty_max - ty_min + 1) <= 36:
-                    for tx in range(tx_min, tx_max + 1):
-                        for ty in range(ty_min, ty_max + 1):
-                            if not (0 <= tx <= max_t and 0 <= ty <= max_t):
-                                continue
-                            if "Satélite" in estilo_sel:
-                                url_t = f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{ty}/{tx}"
-                            else:
-                                url_t = f"https://tile.openstreetmap.org/{zoom}/{tx}/{ty}.png"
-                            try:
-                                r_t = requests.get(url_t, headers=headers_http, timeout=4)
-                                if r_t.status_code == 200:
-                                    tile_im = Image.open(io.BytesIO(r_t.content)).convert("RGB")
-                                    mapa_base.paste(tile_im, (int(tx * 256 - gx0), int(ty * 256 - gy0)))
-                                    tiles_ok += 1
-                            except Exception:
-                                pass
+                tarefas = []
+                for tx in range(tx_min, tx_max + 1):
+                    for ty in range(ty_min, ty_max + 1):
+                        if not (0 <= tx <= max_t and 0 <= ty <= max_t):
+                            continue
+                        if "Híbrido" in estilo_sel:
+                            tarefas.append((tx, ty, 0, "sat", f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{ty}/{tx}"))
+                            tarefas.append((tx, ty, 1, "ref", f"https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{zoom}/{ty}/{tx}"))
+                        elif "Satélite" in estilo_sel:
+                            tarefas.append((tx, ty, 0, "sat", f"https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{zoom}/{ty}/{tx}"))
+                        elif "Topográfico" in estilo_sel:
+                            tarefas.append((tx, ty, 0, "topo", f"https://tile.opentopomap.org/{zoom}/{tx}/{ty}.png"))
+                        elif "Limpo" in estilo_sel:
+                            tarefas.append((tx, ty, 0, "carto", f"https://basemaps.cartocdn.com/light_all/{zoom}/{tx}/{ty}.png"))
+                        else:
+                            tarefas.append((tx, ty, 0, "osm", f"https://tile.openstreetmap.org/{zoom}/{tx}/{ty}.png"))
 
+                if len(tarefas) <= 96:
+                    resultados_tiles = []
+                    with ThreadPoolExecutor(max_workers=10) as pool:
+                        futuros = {
+                            pool.submit(self._baixar_tile_com_cache, cid, u): (tx, ty, ordem)
+                            for (tx, ty, ordem, cid, u) in tarefas
+                        }
+                        for fut in as_completed(futuros):
+                            tx, ty, ordem = futuros[fut]
+                            im_t = fut.result()
+                            if im_t is not None:
+                                resultados_tiles.append((ordem, tx, ty, im_t))
+
+                    resultados_tiles.sort(key=lambda item: item[0])
+                    for ordem, tx, ty, im_t in resultados_tiles:
+                        px_paste = int(tx * 256 - gx0)
+                        py_paste = int(ty * 256 - gy0)
+                        if ordem == 0:
+                            mapa_base.paste(im_t, (px_paste, py_paste))
+                            tiles_ok += 1
+                        else:
+                            mapa_base.alpha_composite(im_t, (px_paste, py_paste))
+
+            mapa_rgb = mapa_base.convert("RGB")
+            draw_m = ImageDraw.Draw(mapa_rgb)
             if tiles_ok == 0:
-                draw_m = ImageDraw.Draw(mapa_base)
                 for gx in range(0, map_w, 80):
                     draw_m.line([(gx, 0), (gx, map_h)], fill=(214, 222, 232), width=1)
                 for gy in range(0, map_h, 80):
                     draw_m.line([(0, gy), (map_w, gy)], fill=(214, 222, 232), width=1)
 
-            draw_m = ImageDraw.Draw(mapa_base)
             try:
                 f_tit = ImageFont.truetype("arialbd.ttf", 20)
                 f_sub = ImageFont.truetype("arial.ttf", 12)
-                f_pin = ImageFont.truetype("arialbd.ttf", 12)
-                f_leg = ImageFont.truetype("arial.ttf", 11)
+                f_pin = ImageFont.truetype("arialbd.ttf", 11)
+                f_leg = ImageFont.truetype("arial.ttf", 10 if duas_colunas_leg else 11)
                 f_leg_b = ImageFont.truetype("arialbd.ttf", 12)
             except Exception:
                 f_tit = f_sub = f_pin = f_leg = f_leg_b = ImageFont.load_default()
@@ -2692,12 +2939,12 @@ class AppPesquisaMercado:
                 cor_pino = (250, 204, 21) if ativo else (160, 160, 160)
                 cor_borda = (120, 53, 15) if ativo else (80, 80, 80)
 
-                draw_m.polygon([(px, py), (px - 8, py - 18), (px + 8, py - 18)], fill=cor_borda)
-                draw_m.ellipse([px - 11, py - 30, px + 11, py - 8], fill=cor_pino, outline=cor_borda, width=2)
+                draw_m.polygon([(px, py), (px - 7, py - 16), (px + 7, py - 16)], fill=cor_borda)
+                draw_m.ellipse([px - 10, py - 27, px + 10, py - 7], fill=cor_pino, outline=cor_borda, width=2)
 
                 etiqueta = f"D.{d['dado_id']:02d}"
-                draw_m.rectangle([px + 13, py - 26, px + 52, py - 10], fill=(255, 255, 255), outline=(31, 60, 91), width=1)
-                draw_m.text((px + 16, py - 24), etiqueta, fill=(31, 60, 91), font=f_pin)
+                draw_m.rectangle([px + 12, py - 24, px + 48, py - 9], fill=(255, 255, 255), outline=(31, 60, 91), width=1)
+                draw_m.text((px + 15, py - 22), etiqueta, fill=(31, 60, 91), font=f_pin)
 
             nx, ny = map_w - 38, 42
             draw_m.ellipse([nx - 22, ny - 22, nx + 22, ny + 22], fill=(255, 255, 255), outline=(31, 60, 91), width=2)
@@ -2718,46 +2965,67 @@ class AppPesquisaMercado:
             lbl_esc = f"{escala_m / 1000:.0f} km" if escala_m >= 1000 else f"{escala_m} m"
             draw_m.text((sx + barra_px + 6, sy - 5), lbl_esc, fill=(31, 60, 91), font=f_leg)
 
-            canvas_img.paste(mapa_base, (map_x0, map_y0))
+            canvas_img.paste(mapa_rgb, (map_x0, map_y0))
             draw.rectangle([map_x0, map_y0, map_x0 + map_w, map_y0 + map_h], outline=(31, 60, 91), width=2)
 
             draw.rectangle([20, 14, W - 20, 54], fill=(31, 60, 91))
             draw.text((34, 23), titulo_txt.upper() or "MAPA DE LOCALIZAÇÃO DAS AMOSTRAS", fill=(255, 255, 255), font=f_tit)
-            draw.text((W - 260, 28), f"SIRGAS 2000 / UTM  •  {data_hoje_br()}", fill=(219, 234, 254), font=f_sub)
+            draw.text((W - 265, 28), f"SIRGAS 2000 / UTM  •  {data_hoje_br()}", fill=(219, 234, 254), font=f_sub)
 
             lx0 = map_x0 + map_w + 14
             draw.rectangle([lx0, map_y0, W - 20, map_y0 + map_h], fill=(255, 255, 255), outline=(31, 60, 91), width=2)
             draw.rectangle([lx0, map_y0, W - 20, map_y0 + 32], fill=(43, 122, 120))
             draw.text((lx0 + 10, map_y0 + 8), f"LEGENDA ({len(pontos)} AMOSTRAS)", fill=(255, 255, 255), font=f_leg_b)
 
-            cur_y = map_y0 + 42
-            for d, _, _ in pontos[:24]:
-                un = d.get("unidade", self.unidade_padrao_projeto)
-                txt_item = f"D.{d['dado_id']:02d} • {d.get('municipio', '')[:16]} • R$ {formatar_moeda_br(d.get('unitario', 0.0))}/{un}"
-                cor_bol = (250, 204, 21) if d.get("utilizado", True) else (180, 180, 180)
-                draw.ellipse([lx0 + 10, cur_y + 2, lx0 + 20, cur_y + 12], fill=cor_bol, outline=(120, 53, 15))
-                draw.text((lx0 + 26, cur_y), txt_item, fill=(30, 41, 59), font=f_leg)
-                cur_y += 26
-            if len(pontos) > 24:
-                draw.text((lx0 + 12, cur_y), f"... e mais {len(pontos) - 24} amostra(s).", fill=(100, 116, 139), font=f_leg)
+            # Legenda dinâmica em 1 ou 2 colunas exibindo TODAS as amostras
+            area_leg_h = map_h - 44
+            num_cols = 2 if duas_colunas_leg else 1
+            itens_por_col = math.ceil(len(pontos) / num_cols)
+            passo_y = max(14, min(26, area_leg_h // max(1, itens_por_col)))
+            col_w = (leg_w - 16) // num_cols
 
-            draw.text((20, H - 32), f"ENPROL Engenharia  •  Total de amostras plotadas: {len(pontos)}  •  Fonte cartográfica: {estilo_sel}", fill=(71, 85, 105), font=f_sub)
+            for idx_p, (d, _, _) in enumerate(pontos):
+                col_i = idx_p // itens_por_col
+                row_i = idx_p % itens_por_col
+                cx = lx0 + 8 + col_i * col_w
+                cy = map_y0 + 40 + row_i * passo_y
+                un = d.get("unidade", self.unidade_padrao_projeto)
+                mun_curto = d.get("municipio", "")[:10 if duas_colunas_leg else 15]
+                txt_item = f"D.{d['dado_id']:02d} • {mun_curto} • R$ {formatar_moeda_br(d.get('unitario', 0.0))}/{un}"
+                cor_bol = (250, 204, 21) if d.get("utilizado", True) else (180, 180, 180)
+                draw.ellipse([cx, cy + 2, cx + 9, cy + 11], fill=cor_bol, outline=(120, 53, 15))
+                draw.text((cx + 13, cy), txt_item, fill=(30, 41, 59), font=f_leg)
+
+            draw.text((20, H - 32), f"ENPROL Engenharia  •  Total de amostras plotadas: {len(pontos)}  •  Camada: {estilo_sel}", fill=(71, 85, 105), font=f_sub)
             return canvas_img
 
-        def atualizar_previa():
-            lbl_mapa.config(image="", text="Carregando mapa e plotando coordenadas...")
-            janela.update_idletasks()
-            img_gerada = renderizar_mapa_pil(cb_estilo.get(), e_tit_mapa.get())
-            imagem_final_holder["img"] = img_gerada
-            prev = img_gerada.copy()
-            prev.thumbnail((880, 540), LANCZOS_FILTER)
-            tk_prev = ImageTk.PhotoImage(prev)
-            self._img_mapa_preview = tk_prev
-            lbl_mapa.config(image=tk_prev, text="")
+        def disparar_render_async():
+            estilo_sel = cb_estilo.get()
+            titulo_txt = e_tit_mapa.get()
+            lbl_mapa.config(image="", text="Carregando camada cartográfica (com cache rápido)...")
+
+            def worker():
+                img_gerada = renderizar_mapa_pil(estilo_sel, titulo_txt)
+                if not janela.winfo_exists():
+                    return
+                imagem_final_holder["img"] = img_gerada
+                prev = img_gerada.copy()
+                prev.thumbnail((940, 570), LANCZOS_FILTER)
+
+                def aplicar_ui():
+                    if janela.winfo_exists():
+                        tk_prev = ImageTk.PhotoImage(prev)
+                        self._img_mapa_preview = tk_prev
+                        lbl_mapa.config(image=tk_prev, text="")
+
+                janela.after(0, aplicar_ui)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def salvar_mapa_jpg():
             if imagem_final_holder["img"] is None:
-                atualizar_previa()
+                messagebox.showinfo("Aguarde", "O mapa ainda está sendo gerado.", parent=janela)
+                return
             arq = filedialog.asksaveasfilename(
                 defaultextension=".jpg",
                 initialfile=f"Mapa_Amostras_{datetime.now().strftime('%Y-%m-%d')}.jpg",
@@ -2772,15 +3040,15 @@ class AppPesquisaMercado:
                 imagem_final_holder["img"].save(arq, "JPEG", quality=92)
             messagebox.showinfo("Mapa Salvo", f"Mapa salvo com sucesso em:\n{arq}", parent=janela)
 
-        ttk.Button(f_ctrl, text="🔄 Atualizar Mapa", command=atualizar_previa).pack(side="left", padx=4)
+        ttk.Button(f_ctrl, text="🔄 Atualizar", command=disparar_render_async).pack(side="left", padx=4)
         ttk.Button(f_ctrl, text="💾 Salvar Mapa JPG", style="Primary.TButton", command=salvar_mapa_jpg).pack(side="right", padx=4)
-        janela.after(80, atualizar_previa)
+        disparar_render_async()
 
     # --- CONVERSOR LAT/LONG <-> UTM ---
     def _janela_conversor_utm(self):
         janela = tk.Toplevel(self.root)
         janela.title("Conversor Geográfico (Lat/Long ↔ UTM SIRGAS 2000)")
-        janela.geometry("480x270")
+        janela.geometry("490x280")
         janela.resizable(False, False)
         janela.transient(self.root)
         janela.grab_set()
@@ -2800,9 +3068,15 @@ class AppPesquisaMercado:
             if lat is None or lon is None:
                 messagebox.showwarning("Formato não reconhecido", "Informe coordenadas válidas (ex: -16.6868, -49.2648 ou link do Google Maps).", parent=janela)
                 return
-            z, ce, cs = latlon_para_utm(lat, lon)
+            try:
+                z, ce, cs = latlon_para_utm(lat, lon)
+            except ValueError as err_geo:
+                messagebox.showerror("Coordenada Fora dos Limites", str(err_geo), parent=janela)
+                return
             res_utm["zona"], res_utm["e"], res_utm["s"] = z, f"{ce:.2f}", f"{cs:.2f}"
-            lbl_prev_utm.config(text=f"Resultado UTM: Zona {z}  |  E: {ce:.2f} m  |  S: {cs:.2f} m")
+            z_num = int(re.match(r"^\d+", z).group(0))
+            aviso_br = "" if (18 <= z_num <= 25) else "  ⚠ (Fora das zonas do Brasil 18–25)"
+            lbl_prev_utm.config(text=f"Resultado UTM: Zona {z}  |  E: {ce:.2f} m  |  S: {cs:.2f} m{aviso_br}")
 
         def aplicar_na_linha():
             if not res_utm["zona"]:
@@ -2827,7 +3101,8 @@ class AppPesquisaMercado:
         f_b.pack(fill="x")
         ttk.Button(f_b, text="Converter", command=converter_agora).pack(side="left", padx=15)
         ttk.Button(f_b, text="✔ Aplicar na Linha Selecionada", style="Primary.TButton", command=aplicar_na_linha).pack(side="right", padx=15)
-# --- EVENTOS DA PLANILHA ---
+
+    # --- EVENTOS DA PLANILHA ---
     def _ao_selecionar_celula(self, event=None):
         sel = self.sheet.get_currently_selected()
         if not sel or sel.row is None or sel.column is None:
@@ -2856,7 +3131,6 @@ class AppPesquisaMercado:
             self.sheet.redraw()
 
     def _perguntar_desambiguacao_nota(self, nota_fmt, candidatos):
-        """Diálogo rápido de 1 clique quando a Nota Agronômica digitada pertence a 2 classes na Tabela 02."""
         janela = tk.Toplevel(self.root)
         janela.title(f"Nota Agronômica {nota_fmt} — Selecionar Classe")
         janela.geometry("440x175")
@@ -3364,85 +3638,239 @@ class AppPesquisaMercado:
         self._reconstruir_planilha()
         self._autosave()
 
+    # --- NOVO GERENCIADOR DE VARIÁVEIS (MESTRE-DETALHE MODERNO E INTUITIVO) ---
     def _janela_config_variaveis(self):
         self._commit_editor_ativo()
         janela = tk.Toplevel(self.root)
-        janela.title("Gerenciador de Variáveis e Catálogo Persistente")
-        janela.geometry("780x550")
+        janela.title("Gerenciador de Variáveis & Catálogo Global")
+        janela.geometry("820x540")
+        janela.resizable(False, False)
         janela.transient(self.root)
         janela.grab_set()
 
-        f_perfis = ttk.LabelFrame(janela, text=" 1. Perfis Rápidos ", padding=6)
-        f_perfis.pack(fill="x", padx=10, pady=6)
-        entradas_vars = []
-        nomes_anteriores = [v["nome"] for v in self.variaveis_config]
+        lista_trabalho = copy.deepcopy(self.variaveis_config)
+        # Guarda nome original no projeto para migrar valores caso o usuário renomeie
+        for item in lista_trabalho:
+            item["_nome_orig"] = item["nome"]
 
-        def recarregar_linhas_editor(lista_cfg):
-            for w in frame_lista.winfo_children():
-                w.destroy()
-            entradas_vars.clear()
-            total_slots = max(10, len(lista_cfg) + 3)
-            ttk.Label(frame_lista, text="Ativar", font=("Segoe UI", 8, "bold")).grid(row=0, column=0, padx=2)
-            ttk.Label(frame_lista, text="Nome da Variável", font=("Segoe UI", 8, "bold")).grid(row=0, column=1, padx=3, sticky="w")
-            ttk.Label(frame_lista, text="Tipo", font=("Segoe UI", 8, "bold")).grid(row=0, column=2, padx=3)
-            ttk.Label(frame_lista, text="Opções (separadas por vírgula)", font=("Segoe UI", 8, "bold")).grid(row=0, column=3, padx=3, sticky="w")
-            for i in range(total_slots):
-                ativa = i < len(lista_cfg)
-                cfg = lista_cfg[i] if ativa else {"nome": "", "tipo": "texto", "opcoes": []}
-                va = tk.BooleanVar(value=ativa)
-                ttk.Checkbutton(frame_lista, text=f"Var {i+1}", variable=va).grid(row=i+1, column=0, padx=2, pady=2)
-                en = ttk.Entry(frame_lista, width=22)
-                en.insert(0, cfg.get("nome", ""))
-                en.grid(row=i+1, column=1, padx=3, pady=2)
-                ct = ttk.Combobox(frame_lista, values=["codigo", "numero", "texto"], width=9, state="readonly")
-                ct.set(cfg.get("tipo", "texto"))
-                ct.grid(row=i+1, column=2, padx=3, pady=2)
-                eo = ttk.Entry(frame_lista, width=44)
-                eo.insert(0, ", ".join([o for o in cfg.get("opcoes", []) if o != ""]))
-                eo.grid(row=i+1, column=3, padx=3, pady=2)
-                entradas_vars.append((va, en, ct, eo))
+        estado = {"idx": 0 if lista_trabalho else None, "bloqueado": False}
 
-        ttk.Button(f_perfis, text="🏙 Urbano", command=lambda: recarregar_linhas_editor(copy.deepcopy(DEFAULT_VARS_PADRAO))).pack(side="left", padx=4)
-        ttk.Button(f_perfis, text="🌾 Rural (Agronômico)", command=lambda: recarregar_linhas_editor(copy.deepcopy(DEFAULT_VARS_RURAL))).pack(side="left", padx=4)
-        ttk.Button(f_perfis, text="💧 COPASA", command=lambda: recarregar_linhas_editor(copy.deepcopy(DEFAULT_VARS_COPASA))).pack(side="left", padx=4)
+        # Barra superior: Perfis Rápidos + Inclusão do Catálogo
+        f_top = ttk.LabelFrame(janela, text=" 1. Carregar Perfil Base ou Incluir do Catálogo Global ", padding=8)
+        f_top.pack(fill="x", padx=12, pady=(10, 6))
 
-        f_cat = ttk.Frame(janela, padding=(10, 2))
-        f_cat.pack(fill="x")
-        ttk.Label(f_cat, text="Catálogo Global (inclui suas variáveis criadas):").pack(side="left")
-        cb_cat = ttk.Combobox(f_cat, values=[v["nome"] for v in self.catalogo_variaveis], width=28, state="readonly")
-        cb_cat.pack(side="left", padx=6)
+        def aplicar_preset(preset_lista):
+            lista_trabalho.clear()
+            for it in copy.deepcopy(preset_lista):
+                it["_nome_orig"] = it["nome"]
+                lista_trabalho.append(it)
+            estado["idx"] = 0 if lista_trabalho else None
+            atualizar_listbox()
 
-        def adicionar_do_catalogo():
+        ttk.Button(f_top, text="🏙 Urbano", command=lambda: aplicar_preset(DEFAULT_VARS_PADRAO)).pack(side="left", padx=3)
+        ttk.Button(f_top, text="🌾 Rural (Agronômico)", command=lambda: aplicar_preset(DEFAULT_VARS_RURAL)).pack(side="left", padx=3)
+        ttk.Button(f_top, text="💧 COPASA", command=lambda: aplicar_preset(DEFAULT_VARS_COPASA)).pack(side="left", padx=3)
+
+        ttk.Separator(f_top, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Label(f_top, text="Catálogo:").pack(side="left")
+        cb_cat = ttk.Combobox(f_top, values=[v["nome"] for v in self.catalogo_variaveis], width=24, state="readonly")
+        if self.catalogo_variaveis:
+            cb_cat.current(0)
+        cb_cat.pack(side="left", padx=4)
+
+        def incluir_do_catalogo():
+            sincronizar_editor_para_item()
             escolha = cb_cat.get()
             item_cat = next((v for v in self.catalogo_variaveis if v["nome"] == escolha), None)
             if not item_cat:
                 return
-            atuais = []
-            for va, en, ct, eo in entradas_vars:
-                if va.get() and en.get().strip():
-                    atuais.append({"nome": en.get().strip(), "tipo": ct.get(), "opcoes": [o.strip() for o in eo.get().split(",") if o.strip()]})
-            if not any(normalizar_chave_var(x["nome"]) == normalizar_chave_var(item_cat["nome"]) for x in atuais):
-                atuais.append(copy.deepcopy(item_cat))
-            recarregar_linhas_editor(atuais)
+            if any(normalizar_chave_var(x["nome"]) == normalizar_chave_var(item_cat["nome"]) for x in lista_trabalho):
+                messagebox.showinfo("Já existe", f"A variável '{item_cat['nome']}' já está na lista ativa.", parent=janela)
+                return
+            novo = copy.deepcopy(item_cat)
+            novo["_nome_orig"] = novo["nome"]
+            lista_trabalho.append(novo)
+            estado["idx"] = len(lista_trabalho) - 1
+            atualizar_listbox()
 
-        ttk.Button(f_cat, text="➕ Incluir", command=adicionar_do_catalogo).pack(side="left")
+        ttk.Button(f_top, text="➕ Incluir", style="Accent.TButton", command=incluir_do_catalogo).pack(side="left", padx=2)
 
-        frame_lista = ttk.LabelFrame(janela, text=" 2. Variáveis Ativas (Renomear migra os dados automaticamente) ", padding=8)
-        frame_lista.pack(fill="both", expand=True, padx=10, pady=6)
-        recarregar_linhas_editor(self.variaveis_config)
+        # Corpo Mestre-Detalhe
+        f_corpo = ttk.Frame(janela, padding=(12, 4))
+        f_corpo.pack(fill="both", expand=True)
 
-        def salvar():
+        # Esquerda: Lista de Variáveis Ativas
+        f_esq = ttk.LabelFrame(f_corpo, text=" 2. Colunas / Variáveis Ativas ", padding=8)
+        f_esq.pack(side="left", fill="both", expand=True, padx=(0, 8))
+
+        lb_vars = tk.Listbox(f_esq, font=("Segoe UI", 10), selectmode="browse", activestyle="none", relief="solid", bd=1)
+        lb_vars.pack(fill="both", expand=True, pady=(0, 6))
+
+        f_btns_esq = ttk.Frame(f_esq)
+        f_btns_esq.pack(fill="x")
+
+        # Direita: Painel de Edição da Variável Selecionada
+        f_dir = ttk.LabelFrame(f_corpo, text=" 3. Propriedades da Variável Selecionada ", padding=12)
+        f_dir.pack(side="right", fill="both", expand=True)
+
+        ttk.Label(f_dir, text="Nome da Variável (Cabeçalho da Coluna):", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        e_nome = ttk.Entry(f_dir, width=38, font=("Segoe UI", 10))
+        e_nome.pack(fill="x", pady=(2, 10))
+
+        ttk.Label(f_dir, text="Tipo de Dado:", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        var_tipo = tk.StringVar(value="texto")
+        f_tipos = ttk.Frame(f_dir)
+        f_tipos.pack(anchor="w", pady=(2, 10))
+        ttk.Radiobutton(f_tipos, text="Lista Suspensa (Código)", value="codigo", variable=var_tipo, command=lambda: on_editar_campo()).pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(f_tipos, text="Número", value="numero", variable=var_tipo, command=lambda: on_editar_campo()).pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(f_tipos, text="Texto Livre", value="texto", variable=var_tipo, command=lambda: on_editar_campo()).pack(side="left")
+
+        ttk.Label(f_dir, text="Opções da Lista Suspensa (1 por linha ou separadas por vírgula):", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        txt_opcoes = tk.Text(f_dir, height=9, font=("Segoe UI", 9), relief="solid", bd=1)
+        txt_opcoes.pack(fill="both", expand=True, pady=(4, 6))
+
+        lbl_dica = ttk.Label(
+            f_dir,
+            text="Dica: Para variáveis numéricas na Regressão SISDEA, use prefixo numérico\n(ex.: '1 - Baixo', '2 - Normal', '3 - Alto').",
+            font=("Segoe UI", 8),
+            foreground="#475569"
+        )
+        lbl_dica.pack(anchor="w")
+
+        def parse_opcoes_widget():
+            bruto = txt_opcoes.get("1.0", tk.END)
+            partes = re.split(r"[\n,;]+", bruto)
+            return [p.strip() for p in partes if p.strip()]
+
+        def sincronizar_editor_para_item():
+            idx = estado["idx"]
+            if estado["bloqueado"] or idx is None or not (0 <= idx < len(lista_trabalho)):
+                return
+            item = lista_trabalho[idx]
+            nm = e_nome.get().strip()
+            if nm:
+                item["nome"] = nm
+            tp = var_tipo.get()
+            item["tipo"] = tp
+            opts = parse_opcoes_widget()
+            item["opcoes"] = ([""] + opts) if (tp == "codigo" and opts) else opts
+
+        def carregar_item_no_editor(idx):
+            estado["bloqueado"] = True
+            if idx is None or not (0 <= idx < len(lista_trabalho)):
+                e_nome.delete(0, tk.END)
+                txt_opcoes.delete("1.0", tk.END)
+                estado["bloqueado"] = False
+                return
+            item = lista_trabalho[idx]
+            e_nome.delete(0, tk.END)
+            e_nome.insert(0, item.get("nome", ""))
+            var_tipo.set(item.get("tipo", "texto"))
+            txt_opcoes.config(state="normal")
+            txt_opcoes.delete("1.0", tk.END)
+            opts_limpas = [o for o in item.get("opcoes", []) if o != ""]
+            txt_opcoes.insert("1.0", "\n".join(opts_limpas))
+            if item.get("tipo") == "numero":
+                txt_opcoes.config(state="disabled")
+            estado["bloqueado"] = False
+
+        def atualizar_listbox():
+            lb_vars.delete(0, tk.END)
+            tipo_lbl = {"codigo": "Lista", "numero": "Número", "texto": "Texto"}
+            for i, it in enumerate(lista_trabalho):
+                lb_vars.insert(tk.END, f" {i + 1:02d}. {it['nome']}   [{tipo_lbl.get(it.get('tipo', 'texto'), 'Texto')}]")
+            idx = estado["idx"]
+            if idx is not None and 0 <= idx < len(lista_trabalho):
+                lb_vars.selection_clear(0, tk.END)
+                lb_vars.selection_set(idx)
+                lb_vars.activate(idx)
+                carregar_item_no_editor(idx)
+            else:
+                carregar_item_no_editor(None)
+
+        def on_select_listbox(event=None):
+            sel = lb_vars.curselection()
+            if not sel:
+                return
+            sincronizar_editor_para_item()
+            estado["idx"] = sel[0]
+            carregar_item_no_editor(sel[0])
+
+        def on_editar_campo(event=None):
+            if estado["bloqueado"]:
+                return
+            txt_opcoes.config(state="disabled" if var_tipo.get() == "numero" else "normal")
+            sincronizar_editor_para_item()
+            idx = estado["idx"]
+            if idx is not None and 0 <= idx < len(lista_trabalho):
+                tipo_lbl = {"codigo": "Lista", "numero": "Número", "texto": "Texto"}
+                it = lista_trabalho[idx]
+                lb_vars.delete(idx)
+                lb_vars.insert(idx, f" {idx + 1:02d}. {it['nome']}   [{tipo_lbl.get(it.get('tipo', 'texto'), 'Texto')}]")
+                lb_vars.selection_set(idx)
+
+        def nova_variavel():
+            sincronizar_editor_para_item()
+            n_num = len(lista_trabalho) + 1
+            lista_trabalho.append({"nome": f"Variável {n_num}", "tipo": "codigo", "opcoes": ["", "1 - Opção A", "2 - Opção B"], "_nome_orig": None})
+            estado["idx"] = len(lista_trabalho) - 1
+            atualizar_listbox()
+            e_nome.focus_set()
+            e_nome.selection_range(0, tk.END)
+
+        def mover_variavel(delta):
+            sincronizar_editor_para_item()
+            idx = estado["idx"]
+            if idx is None:
+                return
+            novo_idx = idx + delta
+            if 0 <= novo_idx < len(lista_trabalho):
+                lista_trabalho[idx], lista_trabalho[novo_idx] = lista_trabalho[novo_idx], lista_trabalho[idx]
+                estado["idx"] = novo_idx
+                atualizar_listbox()
+
+        def remover_variavel():
+            idx = estado["idx"]
+            if idx is None or not (0 <= idx < len(lista_trabalho)):
+                return
+            lista_trabalho.pop(idx)
+            estado["idx"] = min(idx, len(lista_trabalho) - 1) if lista_trabalho else None
+            atualizar_listbox()
+
+        lb_vars.bind("<<ListboxSelect>>", on_select_listbox)
+        e_nome.bind("<KeyRelease>", on_editar_campo)
+        txt_opcoes.bind("<KeyRelease>", on_editar_campo)
+
+        ttk.Button(f_btns_esq, text="➕ Nova Variável", style="Primary.TButton", command=nova_variavel).pack(side="left", padx=2)
+        ttk.Button(f_btns_esq, text="▲ Subir", width=8, command=lambda: mover_variavel(-1)).pack(side="left", padx=2)
+        ttk.Button(f_btns_esq, text="▼ Descer", width=8, command=lambda: mover_variavel(1)).pack(side="left", padx=2)
+        ttk.Button(f_btns_esq, text="🗑 Remover", width=9, command=remover_variavel).pack(side="right", padx=2)
+
+        atualizar_listbox()
+
+        def salvar_e_fechar():
+            sincronizar_editor_para_item()
             novas = []
+            chaves_vistas = set()
             mapa_renomeacao = {}
-            for idx_slot, (va, en, ct, eo) in enumerate(entradas_vars):
-                if va.get() and en.get().strip():
-                    nome_novo = en.get().strip()
-                    if idx_slot < len(nomes_anteriores) and nomes_anteriores[idx_slot] != nome_novo:
-                        mapa_renomeacao[nomes_anteriores[idx_slot]] = nome_novo
-                    opts = [o.strip() for o in eo.get().split(",") if o.strip()]
-                    if ct.get() == "codigo" and opts:
-                        opts = [""] + opts
-                    novas.append({"nome": nome_novo, "tipo": ct.get(), "opcoes": opts})
+
+            for it in lista_trabalho:
+                nm = it.get("nome", "").strip()
+                if not nm:
+                    continue
+                ch = normalizar_chave_var(nm)
+                if ch in chaves_vistas:
+                    messagebox.showerror("Nome Duplicado", f"Existem duas variáveis com o nome '{nm}'. Renomeie uma delas.", parent=janela)
+                    return
+                chaves_vistas.add(ch)
+                orig = it.get("_nome_orig")
+                if orig and orig != nm:
+                    mapa_renomeacao[orig] = nm
+                novas.append({
+                    "nome": nm,
+                    "tipo": it.get("tipo", "texto"),
+                    "opcoes": list(it.get("opcoes", []))
+                })
 
             if mapa_renomeacao:
                 for d in self.dados_pesquisas:
@@ -3460,7 +3888,10 @@ class AppPesquisaMercado:
             self._autosave()
             janela.destroy()
 
-        ttk.Button(janela, text="💾 Salvar e Atualizar Planilha", style="Primary.TButton", command=salvar).pack(pady=8)
+        f_rodape_v = ttk.Frame(janela, padding=8)
+        f_rodape_v.pack(fill="x")
+        ttk.Button(f_rodape_v, text="✖ Cancelar", command=janela.destroy).pack(side="right", padx=12)
+        ttk.Button(f_rodape_v, text="💾 Salvar e Atualizar Planilha", style="Primary.TButton", command=salvar_e_fechar).pack(side="right", padx=4)
 
     def _mostrar_tabela_nota_agronomica(self):
         janela = tk.Toplevel(self.root)
@@ -3480,12 +3911,12 @@ class AppPesquisaMercado:
         for sit, p_s in [("Ótima", "1,00"), ("Muito Boa", "0,95"), ("Boa", "0,90"), ("Desfavorável", "0,80"), ("Má", "0,75"), ("Péssima", "0,70")]:
             t_ref.insert("", "end", values=(sit, p_s) + tuple(TABELA_NOTA_AGRONOMICA[r][sit] for r in ("I", "II", "III", "IV", "V", "VI")))
 
-    # --- ABRIR / SALVAR PROJETO (SEGURO E ATÔMICO) ---
+    # --- ABRIR / SALVAR PROJETO (SEGURO, PROTEGIDO E ATÔMICO) ---
     def _salvar_projeto(self):
         self._commit_editor_ativo()
         caminho = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Projeto de Pesquisa", "*.json")])
         if not caminho:
-            return
+            return False
         dir_origem_anterior = os.path.dirname(self.caminho_projeto_atual) if self.caminho_projeto_atual else None
         self.caminho_projeto_atual = caminho
         pasta_anexos = self._obter_pasta_anexos_projeto()
@@ -3532,9 +3963,11 @@ class AppPesquisaMercado:
                 )
             else:
                 messagebox.showinfo("Sucesso", "Projeto e anexos salvos com sucesso!")
+            return True
         except Exception as e:
             logging.error(f"Erro ao salvar projeto '{caminho}': {e}")
             messagebox.showerror("Erro", f"Erro ao salvar arquivo: {e}")
+            return False
 
     def _aplicar_conteudo_json(self, conteudo):
         self.modelo_ativo = conteudo.get("modelo", "PADRAO")
@@ -3553,6 +3986,8 @@ class AppPesquisaMercado:
         self.alteracoes_pendentes = False
 
     def _executar_abertura_json(self):
+        if not self._verificar_descarte_seguro("abrir outro projeto"):
+            return False
         caminho = filedialog.askopenfilename(filetypes=[("Projeto de Pesquisa", "*.json")])
         if not caminho:
             return False
@@ -3783,17 +4218,20 @@ class AppPesquisaMercado:
 
         messagebox.showinfo("Sucesso", "Planilha Excel (SISDEA) formatada e exportada com sucesso!")
 
-    # --- EXPORTAÇÃO WORD ---
+    # --- EXPORTAÇÃO WORD (SEGURA CONTRA SSRF E CONCORRÊNCIA) ---
     def _baixar_imagem(self, caminho_ou_url):
         if not caminho_ou_url:
             return None
         url = normalizar_url_gdrive(caminho_ou_url)
         try:
             if url.startswith(("http://", "https://")):
-                if not validar_url_http(url):
-                    logging.warning(f"URL inválida ignorada: '{url}'")
+                if not url_eh_segura_publica(url):
+                    logging.warning(f"URL bloqueada por política de segurança (host inválido/privado): '{url}'")
                     return None
-                with requests.get(url, timeout=12, stream=True) as resp:
+                with requests.get(url, timeout=12, stream=True, allow_redirects=True) as resp:
+                    if not url_eh_segura_publica(resp.url):
+                        logging.warning(f"Redirecionamento bloqueado por política de segurança: '{resp.url}'")
+                        return None
                     if resp.status_code != 200:
                         return None
                     ctype = resp.headers.get("Content-Type", "").lower()
@@ -3821,6 +4259,9 @@ class AppPesquisaMercado:
         return None
 
     def _iniciar_exportacao_word_thread(self):
+        if self.exportando_word:
+            messagebox.showinfo("Exportação em Andamento", "Aguarde a conclusão da geração do documento Word atual.")
+            return
         self._commit_editor_ativo()
         if not self.dados_pesquisas:
             messagebox.showwarning("Aviso", "Nenhum dado cadastrado para exportar.")
@@ -3839,6 +4280,7 @@ class AppPesquisaMercado:
         caminho = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Documento Word", "*.docx")])
         if not caminho:
             return
+        self.exportando_word = True
         if hasattr(self, "progress_bar"):
             self.progress_bar.pack(fill="x", padx=8, pady=2)
             self.progress_bar["value"] = 0
@@ -3952,7 +4394,8 @@ class AppPesquisaMercado:
                 else:
                     tabela.style = 'Table Grid'
 
-                for dado in dados_lista[i:i+2]:
+                lote = dados_lista[i:i+2]
+                for idx_lote, dado in enumerate(lote):
                     d_id = dado["dado_id"]
                     sufixo = "" if dado.get("utilizado", True) else " (Não utilizado no modelo)"
                     un = dado.get("unidade", "m²")
@@ -4043,7 +4486,8 @@ class AppPesquisaMercado:
                         p_lbl = c_m.paragraphs[0]; p_lbl.alignment = WD_ALIGN_PARAGRAPH.CENTER; p_lbl.paragraph_format.space_before = Pt(4); p_lbl.paragraph_format.space_after = Pt(4)
                         rn = p_lbl.add_run(f"Pesquisa {d_id:02d}{sufixo}"); rn.font.name = "Arial"; rn.font.size = Pt(10)
 
-                    self.fila_eventos_ui.put(("progresso", int(((i + 1) / max(1, total)) * 100)))
+                    processadas = min(i + idx_lote + 1, total)
+                    self.fila_eventos_ui.put(("progresso", int((processadas / max(1, total)) * 100)))
 
             doc.save(caminho)
             self.fila_eventos_ui.put(("concluido", None))
@@ -4055,11 +4499,13 @@ class AppPesquisaMercado:
             self.progress_bar["value"] = valor
 
     def _concluir_exportacao(self, payload=None):
+        self.exportando_word = False
         if hasattr(self, "progress_bar"):
             self.progress_bar.pack_forget()
         messagebox.showinfo("Sucesso", "Fichas de Pesquisa no Word geradas com sucesso!")
 
     def _falha_exportacao(self, err):
+        self.exportando_word = False
         if hasattr(self, "progress_bar"):
             self.progress_bar.pack_forget()
         messagebox.showerror("Erro na Exportação", f"Ocorreu um erro ao gerar o documento Word: {err}")
